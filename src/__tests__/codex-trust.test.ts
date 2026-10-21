@@ -13,11 +13,14 @@ vi.mock('../utils/logger.js', () => ({
   log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), persist: vi.fn() },
 }));
 
-import { readCodexHookTrustForScope, reconcileTeamHooksForConfig, reportCodexTrust, trustCodexForScope } from '../hooks.js';
-import { removeOwnedCodexProjectTrust, trustCodexHooks, trustCodexProject } from '../codex-trust.js';
+import fc from 'fast-check';
+import { applyAgentHook, readCodexHookTrustForScope, reconcileHooks, reconcileTeamHooksForConfig, removeAgentHook, reportCodexTrust, trustCodexForScope } from '../hooks.js';
+import { readCodexHookTrust, removeOwnedCodexProjectTrust, trustCodexHooks, trustCodexProject } from '../codex-trust.js';
+import { reconcileCodexDispatchers, setCodexDispatcherHooks } from '../codex-team-hooks.js';
 import { resolveAnchors, listWorktrees } from '../utils/git.js';
 import { log } from '../utils/logger.js';
-import type { LocalConfig, TeamaiConfig } from '../types.js';
+import { CODEX_TOOL_ID } from '../types.js';
+import type { HookDef, LocalConfig, TeamaiConfig } from '../types.js';
 import { installFakeCodex, readFakeCodexState, writeFakeCodexOptions } from './helpers/fake-codex.js';
 
 let home: string;
@@ -763,5 +766,341 @@ describe('Codex trust — project scopes', () => {
 
     expect(readFakeCodexState(codexHome()).projects[project]).toEqual({ trust_level: 'untrusted' });
     expect(result.codexTrust).toMatchObject({ kind: 'project-untrusted', project });
+  });
+});
+
+describe('Codex hook positions (#1250)', () => {
+  type Group = { matcher?: string; hooks: Array<{ type: string; command: string; timeout?: number }> };
+  const member = (name: string): Group => ({ hooks: [{ type: 'command', command: `echo ${name}` }] });
+  const hooksFile = (): string => path.join(codexHome(), 'hooks.json');
+
+  async function editHooks(file: string, edit: (hooks: Record<string, Group[]>) => void): Promise<void> {
+    const json = await fse.readJson(file) as { hooks: Record<string, Group[]> };
+    edit(json.hooks);
+    await fse.writeJson(file, json);
+  }
+
+  async function approve(file: string, ...commands: string[]): Promise<void> {
+    const hooks = (await codexEntries(file)).filter((e) => commands.includes(e.command)).map((e) => ({ file, ...e }));
+    expect(hooks).toHaveLength(commands.length);
+    expect(await trustCodexHooks({ codexHome: codexHome(), cwd: home, hooks })).toMatchObject({ kind: 'trusted' });
+  }
+
+  async function trustByCommand(file: string): Promise<Record<string, string>> {
+    const entries = await codexEntries(file);
+    const report = await readCodexHookTrust({ codexHome: codexHome(), cwd: home, hooks: entries.map((e) => ({ file, ...e })) });
+    if (report.kind !== 'listed') throw new Error(report.reason);
+    const notTrusted = new Map(report.notTrusted.map((h) => [h.command, h.status]));
+    return Object.fromEntries(entries.map((e) => [e.command, notTrusted.get(e.command) ?? 'trusted']));
+  }
+
+  async function keyOf(file: string, command: string): Promise<string | undefined> {
+    return (await codexEntries(file)).find((e) => e.command === command)?.key;
+  }
+
+  it('leaves interleaved member groups where they are, and does not start Codex, when nothing changed', async () => {
+    await writeYaml(LINT_HOOK);
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => {
+      for (const [event, groups] of Object.entries(hooks)) {
+        hooks[event] = [member(`${event}-first`), ...groups.flatMap((group, i) => [group, member(`${event}-${i}`)])];
+      }
+    });
+    const members = (await codexEntries(file)).map((e) => e.command).filter((c) => c.startsWith('echo '));
+    await approve(file, ...members);
+    const before = await fse.readFile(file, 'utf8');
+    const started = calls('initialize');
+
+    await reconcileTeamHooksForConfig(teamConfig, userConfig());
+    await reconcileTeamHooksForConfig(teamConfig, userConfig());
+
+    expect(await fse.readFile(file, 'utf8')).toBe(before);
+    expect(calls('initialize')).toBe(started);
+    const after = await trustByCommand(file);
+    expect(members.filter((command) => after[command] !== 'trusted')).toEqual([]);
+  });
+
+  it('updates a team hook in its own slot, leaving the member group after it at its key', async () => {
+    await writeYaml(LINT_HOOK);
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.PreToolUse.push(member('after-lint')); });
+    await approve(file, 'echo after-lint');
+    const key = await keyOf(file, 'echo after-lint');
+    const started = calls('initialize');
+
+    await writeYaml(LINT_HOOK.replace('npm run lint', 'npm run lint:fix'));
+    await reconcileTeamHooksForConfig(teamConfig, userConfig());
+
+    expect(calls('initialize')).toBe(started);
+    expect((await fse.readJson(file)).hooks.PreToolUse).toEqual([
+      { hooks: [{ type: 'command', command: 'npm run lint:fix' }] }, member('after-lint'),
+    ]);
+    expect(await keyOf(file, 'echo after-lint')).toBe(key);
+    expect((await trustByCommand(file))['echo after-lint']).toBe('trusted');
+  });
+
+  it('appends a new team hook after the member groups', async () => {
+    await writeYaml(LINT_HOOK);
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.PreToolUse.push(member('after-lint')); });
+    await approve(file, 'echo after-lint');
+    const key = await keyOf(file, 'echo after-lint');
+    const started = calls('initialize');
+
+    await writeYaml(`${LINT_HOOK}  - id: test\n    description: run tests before a tool\n    event: PreToolUse\n    command: npm test\n`);
+    await reconcileTeamHooksForConfig(teamConfig, userConfig());
+
+    expect(calls('initialize')).toBe(started);
+    expect((await fse.readJson(file)).hooks.PreToolUse).toEqual([
+      { hooks: [{ type: 'command', command: 'npm run lint' }] },
+      member('after-lint'),
+      { hooks: [{ type: 'command', command: 'npm test' }] },
+    ]);
+    expect(await keyOf(file, 'echo after-lint')).toBe(key);
+    expect((await trustByCommand(file))['echo after-lint']).toBe('trusted');
+  });
+
+  it('carries the approval of a member group a removal moves, clears the keys teamai vacated, and trusts nothing new', async () => {
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.SessionStart.push(member('approved'), member('unapproved')); });
+    await approve(file, 'echo approved');
+
+    await writeAndTrust(userConfig(), { removeAll: true });
+
+    expect((await fse.readJson(file)).hooks.SessionStart).toEqual([member('approved'), member('unapproved')]);
+    const after = await trustByCommand(file);
+    expect(after['echo approved']).toBe('trusted');
+    expect(after['echo unapproved']).not.toBe('trusted');
+    const live = new Set((await codexEntries(file)).map((e) => e.key));
+    expect(trustedKeys().filter((key) => !live.has(key))).toEqual([]);
+  });
+
+  it('clears the approval a moved, unapproved member group lands on', async () => {
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.SessionStart.push(member('unapproved')); });
+
+    await writeAndTrust(userConfig(), { removeAll: true });
+
+    expect((await fse.readJson(file)).hooks.SessionStart).toEqual([member('unapproved')]);
+    expect(await trustByCommand(file)).toEqual({ 'echo unapproved': 'untrusted' });
+  });
+
+  it('writes no trust and starts no Codex for a move when the active config turned trust off', async () => {
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.SessionStart.push(member('approved')); });
+    await approve(file, 'echo approved');
+    const started = calls('initialize');
+    const writes = calls('config/batchWrite');
+
+    await reconcileTeamHooksForConfig(teamConfig, userConfig({ codexTrustEnabled: false }), { removeAll: true });
+
+    expect((await fse.readJson(file)).hooks.SessionStart).toEqual([member('approved')]);
+    expect(calls('initialize')).toBe(started);
+    expect(calls('config/batchWrite')).toBe(writes);
+  });
+
+  it('writes no trust and starts no Codex for a move when the caller states no trust policy', async () => {
+    await writeAndTrust(userConfig());
+    const file = hooksFile();
+    await editHooks(file, (hooks) => { hooks.SessionStart.push(member('approved')); });
+    await approve(file, 'echo approved');
+    const started = calls('initialize');
+
+    await reconcileHooks(file, CODEX_TOOL_ID, [], { removeAll: true });
+
+    expect((await fse.readJson(file)).hooks.SessionStart).toEqual([member('approved')]);
+    expect(calls('initialize')).toBe(started);
+  });
+
+  it('starts no Codex for a move in an internal Codex variant\'s file', async () => {
+    const internal = path.join(home, '.codex-internal');
+    await fse.ensureDir(internal);
+    const file = path.join(internal, 'hooks.json');
+    await reconcileTeamHooksForConfig(teamConfig, userConfig(), { filterAgents: ['codex-internal'] });
+    await editHooks(file, (hooks) => { hooks.SessionStart.push(member('mine')); });
+
+    await reconcileTeamHooksForConfig(teamConfig, userConfig(), { removeAll: true, filterAgents: ['codex-internal'] });
+
+    expect((await fse.readJson(file)).hooks.SessionStart).toEqual([member('mine')]);
+    expect(readFakeCodexState(codexHome()).calls).toEqual([]);
+    expect(await fse.pathExists(path.join(internal, 'fake-state.json'))).toBe(false);
+  });
+
+  describe('team-hook dispatchers', () => {
+    let project: string;
+    const stop = (timeout: number) => [{ id: 'team-stop', event: 'Stop', command: 'echo team-stop', timeout }];
+    const isDispatcher = (group: Group): boolean => group.hooks[0].command.includes('--team-hooks');
+
+    beforeEach(async () => {
+      project = path.join(home, 'project');
+      await fse.ensureDir(project);
+    });
+
+    it('changes a dispatcher\'s timeout in place', async () => {
+      const file = hooksFile();
+      await setCodexDispatcherHooks(project, stop(30));
+      await reconcileCodexDispatchers(file);
+      await editHooks(file, (hooks) => { hooks.Stop.push(member('after-dispatcher')); });
+      await approve(file, 'echo after-dispatcher');
+      const key = await keyOf(file, 'echo after-dispatcher');
+      const started = calls('initialize');
+
+      await setCodexDispatcherHooks(project, stop(45));
+      await reconcileCodexDispatchers(file);
+
+      const groups: Group[] = (await fse.readJson(file)).hooks.Stop;
+      expect(groups.map(isDispatcher)).toEqual([true, false]);
+      expect(groups[0].hooks[0].timeout).toBe(45);
+      expect(await keyOf(file, 'echo after-dispatcher')).toBe(key);
+      expect(calls('initialize')).toBe(started);
+    });
+
+    it('appends a new dispatcher after the groups already there', async () => {
+      await writeAndTrust(userConfig());
+      const file = hooksFile();
+      await editHooks(file, (hooks) => { hooks.Stop.push(member('after-builtin')); });
+      await approve(file, 'echo after-builtin');
+      const before: Group[] = (await fse.readJson(file)).hooks.Stop;
+      const started = calls('initialize');
+
+      await setCodexDispatcherHooks(project, stop(30));
+      await reconcileCodexDispatchers(file);
+
+      const groups: Group[] = (await fse.readJson(file)).hooks.Stop;
+      expect(groups.slice(0, before.length)).toEqual(before);
+      expect(groups.slice(before.length).map(isDispatcher)).toEqual([true]);
+      expect(calls('initialize')).toBe(started);
+      expect((await trustByCommand(file))['echo after-builtin']).toBe('trusted');
+    });
+
+    it('carries the approval of a member group a removed dispatcher moves', async () => {
+      const file = hooksFile();
+      await setCodexDispatcherHooks(project, stop(30));
+      await reconcileCodexDispatchers(file);
+      await editHooks(file, (hooks) => { hooks.Stop.push(member('after-dispatcher')); });
+      const dispatcher = (await codexEntries(file))[0].command;
+      await approve(file, dispatcher, 'echo after-dispatcher');
+
+      await setCodexDispatcherHooks(project, null);
+      await reconcileCodexDispatchers(file);
+
+      expect((await fse.readJson(file)).hooks.Stop).toEqual([member('after-dispatcher')]);
+      expect(await trustByCommand(file)).toEqual({ 'echo after-dispatcher': 'trusted' });
+      const live = new Set((await codexEntries(file)).map((e) => e.key));
+      expect(trustedKeys().filter((key) => !live.has(key))).toEqual([]);
+    });
+  });
+
+  describe('agent hooks', () => {
+    const agent = { slug: 'a', event: 'Stop', command: 'echo agent' };
+
+    it('replaces an agent hook in its own slot', async () => {
+      const file = hooksFile();
+      await applyAgentHook(file, CODEX_TOOL_ID, { ...agent, timeout: 10 });
+      await editHooks(file, (hooks) => { hooks.Stop.push(member('after-agent')); });
+      await approve(file, 'echo after-agent');
+      const key = await keyOf(file, 'echo after-agent');
+      const started = calls('initialize');
+
+      await applyAgentHook(file, CODEX_TOOL_ID, { ...agent, timeout: 20 });
+
+      expect((await fse.readJson(file)).hooks.Stop).toEqual([
+        { hooks: [{ type: 'command', command: 'echo agent', timeout: 20 }] }, member('after-agent'),
+      ]);
+      expect(await keyOf(file, 'echo after-agent')).toBe(key);
+      expect(calls('initialize')).toBe(started);
+    });
+
+    it('carries the approval of a member group a removed agent hook moves', async () => {
+      const file = hooksFile();
+      await applyAgentHook(file, CODEX_TOOL_ID, agent);
+      await editHooks(file, (hooks) => { hooks.Stop.push(member('after-agent')); });
+      await approve(file, 'echo agent', 'echo after-agent');
+
+      await removeAgentHook(file, CODEX_TOOL_ID, agent);
+
+      expect((await fse.readJson(file)).hooks.Stop).toEqual([member('after-agent')]);
+      expect(await trustByCommand(file)).toEqual({ 'echo after-agent': 'trusted' });
+    });
+
+    it('keeps the approval of a member group in an event a removed agent hook does not touch', async () => {
+      const file = hooksFile();
+      await applyAgentHook(file, CODEX_TOOL_ID, agent);
+      await editHooks(file, (hooks) => {
+        hooks.Stop.push(member('after-agent'));
+        hooks.SessionStart = [member('other-event')];
+      });
+      await approve(file, 'echo agent', 'echo after-agent', 'echo other-event');
+
+      await removeAgentHook(file, CODEX_TOOL_ID, agent);
+
+      expect(await trustByCommand(file)).toEqual({ 'echo after-agent': 'trusted', 'echo other-event': 'trusted' });
+    });
+
+    it('keeps the approval of a member group in another event when it collapses a duplicate agent hook', async () => {
+      const file = hooksFile();
+      await applyAgentHook(file, CODEX_TOOL_ID, agent);
+      await editHooks(file, (hooks) => {
+        hooks.Stop.push({ hooks: [{ type: 'command', command: 'echo agent', timeout: 5 }] }, member('after-copy'));
+        hooks.SessionStart = [member('other-event')];
+      });
+      await approve(file, 'echo after-copy', 'echo other-event');
+
+      await applyAgentHook(file, CODEX_TOOL_ID, agent);
+
+      expect((await fse.readJson(file)).hooks.Stop).toEqual([
+        { hooks: [{ type: 'command', command: 'echo agent' }] }, member('after-copy'),
+      ]);
+      expect(await trustByCommand(file)).toMatchObject({ 'echo after-copy': 'trusted', 'echo other-event': 'trusted' });
+    });
+  });
+
+  it('keeps every member group at its index with equal bytes, for any interleaving and any update without removals', async () => {
+    const file = hooksFile();
+    const manifestPath = path.join(home, '.teamai', 'managed-hooks.json');
+    const events = ['PreToolUse', 'Stop', 'SessionStart'];
+    const teamHook = (event: string, id: string, command: string, timeout?: number): HookDef => ({
+      source: 'team', key: id, event, command, description: `[teamai:hook:${id}]`, ...(timeout === undefined ? {} : { timeout }),
+    });
+    const event = fc.constantFrom(...events);
+
+    await fc.assert(fc.asyncProperty(
+      fc.array(fc.record({ event, timeout: fc.option(fc.integer({ min: 1, max: 60 }), { nil: undefined }) }), { maxLength: 6 }),
+      fc.array(fc.record({ event, at: fc.nat() }), { minLength: 1, maxLength: 6 }),
+      fc.array(fc.constantFrom('same', 'command', 'timeout'), { maxLength: 6 }),
+      fc.array(event, { maxLength: 3 }),
+      async (team, members, changes, additions) => {
+        await fse.remove(file);
+        await fse.remove(manifestPath);
+        const installed = team.map((h, i) => teamHook(h.event, `t${i}`, `npm run t${i}`, h.timeout));
+        await reconcileHooks(file, CODEX_TOOL_ID, installed, { manifestPath });
+        await editHooks(file, (hooks) => members.forEach((m, i) => {
+          const groups = hooks[m.event] ??= [];
+          groups.splice(m.at % (groups.length + 1), 0, member(`member-${i}`));
+        }));
+        const placed: Record<string, Group[]> = (await fse.readJson(file)).hooks;
+        const desired = [
+          ...installed.map((def, i) => changes[i] === 'command' ? { ...def, command: `${def.command}:v2` }
+            : changes[i] === 'timeout' ? { ...def, timeout: (def.timeout ?? 0) + 1 } : def),
+          ...additions.map((e, i) => teamHook(e, `n${i}`, `npm run n${i}`)),
+        ];
+
+        await reconcileHooks(file, CODEX_TOOL_ID, desired, { manifestPath });
+
+        const now: Record<string, Group[]> = (await fse.readJson(file)).hooks;
+        for (const [name, groups] of Object.entries(placed)) {
+          groups.forEach((group, index) => {
+            if (group.hooks[0].command.startsWith('echo member-')) expect(now[name][index]).toEqual(group);
+          });
+        }
+      },
+    ), { numRuns: 60 });
+    expect(readFakeCodexState(codexHome()).calls).toEqual([]);
   });
 });
