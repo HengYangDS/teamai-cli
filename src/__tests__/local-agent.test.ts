@@ -43,7 +43,7 @@ beforeEach(async () => {
   origCopilotHome = process.env.COPILOT_HOME;
   process.env.HOME = tmpDir;
   vi.mocked(trustCodexHooks).mockResolvedValue({ kind: 'trusted', hooks: 1 });
-  vi.mocked(keepCodexHookTrust).mockImplementation(async (_req, write) => {
+  vi.mocked(keepCodexHookTrust).mockImplementation(async (_req, _retained, write) => {
     await write();
     return { kind: 'trusted', hooks: 0 };
   });

@@ -93,7 +93,7 @@ describe('reconcileCodexDispatchers — the Windows override keeps the block con
     const hooksFile = path.join(root, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({ hooks: {} }));
 
-    await reconcileCodexDispatchers(hooksFile);
+    await reconcileCodexDispatchers(hooksFile, { kind: 'disabled' });
 
     const entry = JSON.parse(fs.readFileSync(hooksFile, 'utf-8')).hooks.Stop[0].hooks[0];
     // The command stays the POSIX form on every platform (#1074's contract),
@@ -109,9 +109,9 @@ describe('reconcileCodexDispatchers — the Windows override keeps the block con
     seed({ hooks: [{ id: 'team', event: 'Stop', command: 'echo a' }] });
     const hooksFile = path.join(root, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({ hooks: {} }));
-    await reconcileCodexDispatchers(hooksFile);
+    await reconcileCodexDispatchers(hooksFile, { kind: 'disabled' });
     const first = fs.readFileSync(hooksFile, 'utf-8');
-    await reconcileCodexDispatchers(hooksFile);
+    await reconcileCodexDispatchers(hooksFile, { kind: 'disabled' });
     expect(fs.readFileSync(hooksFile, 'utf-8')).toBe(first);
   });
 });

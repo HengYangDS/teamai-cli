@@ -288,31 +288,48 @@ function hooksByKey(hooks: HookInfo[], file: string): Map<string, HookInfo> {
   return new Map(hooks.filter((h) => canonical(h.sourcePath) === file).map((h) => [h.key, h]));
 }
 
+function hasApprovalState(hook: HookInfo): boolean {
+  return hook.trustStatus === 'trusted' || hook.trustStatus === 'modified';
+}
+
 /**
- * Keep approvals for the exact handlers retained by `write`, which returns
- * their new keys mapped to their original keys. Equal hashes alone do not
- * establish identity. `write` runs even when Codex cannot be asked.
+ * Keep approvals for the exact handlers `write` retains: `retained` maps each
+ * one's new key to its original key. Equal hashes alone do not establish
+ * identity. A key a handler left loses its state unless the handler now there
+ * carries its own approval, so no group shows an approval it was never given.
+ * `write` runs even when Codex cannot be asked.
  */
 export async function keepCodexHookTrust(
   req: { codexHome: string; cwd: string; file: string },
-  write: () => Promise<ReadonlyMap<string, string> | void>,
+  retained: ReadonlyMap<string, string>,
+  write: () => Promise<void>,
 ): Promise<CodexTrust> {
   const file = canonical(req.file);
   const before = await withAppServer(req.codexHome, async (server) => hooksByKey(await listHooks(server, req.cwd), file));
-  const retained = await write();
+  await write();
   if (!(before instanceof Map)) return before;
-  if (!retained || ![...before.values()].some((h) => h.trustStatus === 'trusted')) return { kind: 'trusted', hooks: 0 };
+  if (![...before.values()].some(hasApprovalState)) return { kind: 'trusted', hooks: 0 };
   return withAppServer(req.codexHome, async (server): Promise<CodexTrust> => {
     const toTrust: HookInfo[] = [];
     const edits: Array<{ keyPath: string; value: unknown; mergeStrategy: 'upsert' | 'replace' }> = [];
-    for (const hook of hooksByKey(await listHooks(server, req.cwd), file).values()) {
+    const after = hooksByKey(await listHooks(server, req.cwd), file);
+    for (const hook of after.values()) {
       const originalKey = retained.get(hook.key);
       const original = originalKey === undefined ? undefined : before.get(originalKey);
       if (original?.trustStatus === 'trusted' && original.currentHash === hook.currentHash) {
         if (hook.trustStatus !== 'trusted') {
           toTrust.push(hook);
         }
-      } else if (hook.trustStatus === 'trusted') {
+      } else if (originalKey !== hook.key && hasApprovalState(hook)) {
+        edits.push({
+          keyPath: `hooks.state.${JSON.stringify(hook.key)}`,
+          value: null,
+          mergeStrategy: 'replace',
+        });
+      }
+    }
+    for (const hook of before.values()) {
+      if (hasApprovalState(hook) && !after.has(hook.key)) {
         edits.push({
           keyPath: `hooks.state.${JSON.stringify(hook.key)}`,
           value: null,
