@@ -9,6 +9,11 @@ vi.mock('../utils/git.js', async (importOriginal) => ({
   listWorktrees: vi.fn().mockResolvedValue([]),
 }));
 
+vi.mock('cross-spawn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('cross-spawn')>();
+  return { ...actual, default: vi.fn(actual.default) };
+});
+
 vi.mock('../utils/logger.js', () => ({
   log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), persist: vi.fn() },
 }));
@@ -17,6 +22,7 @@ import fc from 'fast-check';
 import { applyAgentHook, codexTrustPolicy, readCodexHookTrustForScope, reconcileHooks, reconcileTeamHooksForConfig, removeAgentHook, reportCodexTrust, trustCodexForScope, type CodexTrustPolicy } from '../hooks.js';
 import { readCodexHookTrust, removeOwnedCodexProjectTrust, trustCodexHooks, trustCodexProject } from '../codex-trust.js';
 import { reconcileCodexDispatchers, setCodexDispatcherHooks } from '../codex-team-hooks.js';
+import crossSpawn from 'cross-spawn';
 import { resolveAnchors, listWorktrees } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { CODEX_TOOL_ID } from '../types.js';
@@ -1103,5 +1109,208 @@ describe('Codex hook positions (#1250)', () => {
       },
     ), { numRuns: 60 });
     expect(readFakeCodexState(codexHome()).calls).toEqual([]);
+  });
+});
+
+describe('Codex trust — which Codex build answers (#1244)', () => {
+  const OLD = { version: '0.142.5', hashIgnores: ['additionalContextLimit'] };
+
+  function installPathCodex(options: { version: string; hashIgnores?: string[] }): string {
+    const dir = installFakeCodex(options);
+    extraDirs.push(dir);
+    vi.stubEnv('PATH', `${dir}${path.delimiter}${process.env.PATH ?? ''}`);
+    return path.join(dir, 'codex');
+  }
+
+  function installDesktopCodex(version: string): string {
+    return path.join(installFakeCodex({ version, dir: path.join(home, 'Applications', 'ChatGPT.app', 'Contents', 'Resources') }), 'codex');
+  }
+
+  async function withoutCodexOnPath(): Promise<void> {
+    const empty = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-codex-trust-empty-'));
+    extraDirs.push(empty);
+    vi.stubEnv('PATH', empty);
+  }
+
+  function answeredBy(method?: string): string[] {
+    return [...new Set(readFakeCodexState(codexHome()).calls.filter((c) => !method || c.method === method).map((c) => c.codex))];
+  }
+
+  function started(codex: string): number {
+    return readFakeCodexState(codexHome()).calls.filter((c) => c.method === 'initialize' && c.codex === codex).length;
+  }
+
+  const extraDirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(extraDirs.splice(0).map((dir) => fse.remove(dir)));
+  });
+
+  it('trusts and diagnoses with the newest build, and names both when PATH and the desktop app hash a hook differently', async () => {
+    const old = installPathCodex(OLD);
+    const desktop = installDesktopCodex('0.163.0');
+    const skew = { chosen: { path: desktop, version: '0.163.0' }, others: [{ path: old, version: '0.142.5' }] };
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust).toMatchObject({ kind: 'trusted', skew });
+    expect(answeredBy('config/batchWrite')).toEqual([desktop]);
+    expect(answeredBy()).toEqual([desktop, old]);
+    expect(await readCodexHookTrustForScope(teamConfig, userConfig())).toEqual({ kind: 'listed', notTrusted: [], skew });
+
+    reportCodexTrust(codexTrust, 'problems');
+    const warning = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).find((m) => m.startsWith('Codex builds disagree:'));
+    expect(warning).toContain(`teamai trusts its hooks with ${desktop} (codex-cli 0.163.0)`);
+    expect(warning).toContain(`${old} (codex-cli 0.142.5) hashes some of them differently and skips those`);
+  });
+
+  it('warns on every pull while the builds disagree, and the second pull starts no Codex', async () => {
+    installPathCodex(OLD);
+    installDesktopCodex('0.163.0');
+
+    const first = await writeAndTrust(userConfig());
+    const callsAfterFirst = readFakeCodexState(codexHome()).calls.length;
+    const second = await writeAndTrust(userConfig());
+
+    expect(readFakeCodexState(codexHome()).calls.length).toBe(callsAfterFirst);
+    reportCodexTrust(first.codexTrust, 'problems');
+    reportCodexTrust(second.codexTrust, 'problems');
+    const warnings = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).filter((m) => m.startsWith('Codex builds disagree:'));
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toBe(warnings[0]);
+  });
+
+  it('compares the builds again on the next pull when an older build could not list the hooks', async () => {
+    const old = installPathCodex(OLD);
+    installDesktopCodex('0.163.0');
+    writeFakeCodexOptions(codexHome(), { failMethod: 'hooks/list', failCodex: old });
+    await writeAndTrust(userConfig());
+    writeFakeCodexOptions(codexHome(), {});
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(started(old)).toBe(2);
+    reportCodexTrust(codexTrust, 'problems');
+    const warnings = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).filter((m) => m.startsWith('Codex builds disagree:'));
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('stops starting an older build once it failed to list the hooks on two pulls in a row', async () => {
+    const old = installPathCodex(OLD);
+    installDesktopCodex('0.163.0');
+    writeFakeCodexOptions(codexHome(), { failMethod: 'hooks/list', failCodex: old });
+    await writeAndTrust(userConfig());
+    await writeAndTrust(userConfig());
+    expect(started(old)).toBe(2);
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust?.kind).toBe('trusted');
+    expect(started(old)).toBe(2);
+  });
+
+  it('re-trusts with the newest build a hash an older build wrote', async () => {
+    installPathCodex(OLD);
+    await writeAndTrust(userConfig());
+    const desktop = installDesktopCodex('0.163.0');
+
+    await writeAndTrust(userConfig());
+
+    expect(started(desktop)).toBe(1);
+    expect(readFakeCodexState(codexHome()).calls.filter((c) => c.method === 'config/batchWrite').map((c) => c.codex).at(-1)).toBe(desktop);
+    expect(await readCodexHookTrustForScope(teamConfig, userConfig())).toMatchObject({ kind: 'listed', notTrusted: [] });
+  });
+
+  it('reports no skew when builds of different versions hash the teamai hooks alike', async () => {
+    installPathCodex({ version: '0.142.5' });
+    installDesktopCodex('0.163.0');
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust?.kind).toBe('trusted');
+    expect(codexTrust).not.toHaveProperty('skew');
+    expect(await readCodexHookTrustForScope(teamConfig, userConfig())).toEqual({ kind: 'listed', notTrusted: [] });
+    reportCodexTrust(codexTrust, 'problems');
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('starts no older build when the newest lists none of the teamai hooks', async () => {
+    const old = installPathCodex(OLD);
+    installDesktopCodex('0.163.0');
+    await reconcileTeamHooksForConfig(teamConfig, userConfig());
+    const commands = (await codexEntries(path.join(codexHome(), 'hooks.json'))).map((e) => e.command);
+    writeFakeCodexOptions(codexHome(), { omitCommands: commands });
+
+    expect(await trustCodexForScope(teamConfig, userConfig())).toMatchObject({ kind: 'failed' });
+    expect(await readCodexHookTrustForScope(teamConfig, userConfig())).toMatchObject({ kind: 'listed' });
+    expect(started(old)).toBe(0);
+  });
+
+  it('reports no skew when every build reports one version, and keeps the PATH build', async () => {
+    const onPath = installPathCodex({ version: '0.163.0' });
+    installDesktopCodex('0.163.0');
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust?.kind).toBe('trusted');
+    expect(codexTrust).not.toHaveProperty('skew');
+    expect(answeredBy()).toEqual([onPath]);
+    reportCodexTrust(codexTrust, 'problems');
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('uses the desktop build when codex is not on PATH', async () => {
+    await withoutCodexOnPath();
+    const desktop = installDesktopCodex('0.163.0');
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust?.kind).toBe('trusted');
+    expect(codexTrust).not.toHaveProperty('skew');
+    expect(answeredBy()).toEqual([desktop]);
+  });
+
+  it('reports Codex unavailable without starting a process when no build exists', async () => {
+    await withoutCodexOnPath();
+    vi.mocked(crossSpawn).mockClear();
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust).toEqual({ kind: 'unavailable', reason: 'codex is not on PATH' });
+    expect(crossSpawn).not.toHaveBeenCalled();
+  });
+
+  it('counts only the most recently modified Windows desktop bundle', async () => {
+    const localAppData = path.join(home, 'AppData', 'Local');
+    vi.stubEnv('LOCALAPPDATA', localAppData);
+    const bundle = async (hash: string, version: string, mtime: Date): Promise<string> => {
+      const dir = installFakeCodex({ version, dir: path.join(localAppData, 'OpenAI', 'Codex', 'bin', hash) });
+      const exe = path.join(dir, 'codex.exe');
+      await fse.move(path.join(dir, 'codex'), exe);
+      await fse.utimes(exe, mtime, mtime);
+      return exe;
+    };
+    await bundle('aaa', '0.100.0', new Date('2026-01-01'));
+    const newest = await bundle('bbb', '0.170.0', new Date('2026-06-01'));
+    const onPath = installPathCodex({ ...OLD, version: '0.163.0' });
+
+    const { codexTrust } = await writeAndTrust(userConfig());
+
+    expect(codexTrust).toMatchObject({
+      kind: 'trusted',
+      skew: { chosen: { path: newest, version: '0.170.0' }, others: [{ path: onPath, version: '0.163.0' }] },
+    });
+  });
+
+  it('asks Codex again after the desktop build changed', async () => {
+    installPathCodex(OLD);
+    const desktop = installDesktopCodex('0.163.0');
+    await writeAndTrust(userConfig());
+    await writeAndTrust(userConfig());
+    expect(started(desktop)).toBe(1);
+
+    await fse.appendFile(desktop, '# upgraded\n');
+    await writeAndTrust(userConfig());
+
+    expect(started(desktop)).toBe(2);
   });
 });
