@@ -10,7 +10,7 @@ vi.mock('../utils/git.js', async (importOriginal) => ({
 }));
 
 vi.mock('cross-spawn', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('cross-spawn')>();
+  const actual = await importOriginal<{ default: typeof import('cross-spawn') }>();
   return { ...actual, default: vi.fn(actual.default) };
 });
 
@@ -391,7 +391,7 @@ describe('Codex hook trust — user scope', () => {
     vi.stubEnv('PATH', empty);
     try {
       const reconciled = await writeAndTrust(userConfig());
-      expect(reconciled.codexTrust).toEqual({ kind: 'unavailable', reason: 'codex is not on PATH' });
+      expect(reconciled.codexTrust).toEqual({ kind: 'unavailable', reason: 'codex is not on PATH and no Codex desktop app is installed' });
     } finally {
       await fse.remove(empty);
     }
@@ -1275,7 +1275,7 @@ describe('Codex trust — which Codex build answers (#1244)', () => {
 
     const { codexTrust } = await writeAndTrust(userConfig());
 
-    expect(codexTrust).toEqual({ kind: 'unavailable', reason: 'codex is not on PATH' });
+    expect(codexTrust).toEqual({ kind: 'unavailable', reason: 'codex is not on PATH and no Codex desktop app is installed' });
     expect(crossSpawn).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { readFile, realpath, stat } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import matter from 'gray-matter';
 import {
   buildRolePullContext, collectClaudemdFiles, describeDeliveryConflict, indexedRuleFiles,
@@ -35,7 +36,7 @@ import {
   type DeliveredHashes, type DeliveryLedger,
 } from './resources/delivered-copies.js';
 import { BUILTIN_SKILL_NAMES } from './builtin-skills.js';
-import type { AgentModelRecords, GlobalOptions, ResourceType, ResourceItem, TeamaiConfig, LocalConfig, State } from './types.js';
+import type { AgentModelRecords, CodexBuildSkew, GlobalOptions, ResourceType, ResourceItem, TeamaiConfig, LocalConfig, State } from './types.js';
 import {
   getUserLearningsDir,
   TEAMAI_CULTURE_START,
@@ -3726,13 +3727,16 @@ async function trustCodexAllScopes(
 ): Promise<void> {
   if (options.dryRun) return;
   const scopes = [userConfig, projectConfig].filter((c): c is LocalConfig => !!c);
+  let warnedSkew: CodexBuildSkew | undefined;
   for (const localConfig of scopes) {
     try {
       const teamConfig = await loadTeamConfig(localConfig.repo.localPath);
       if (!teamConfig) continue;
       const { reportCodexTrust, trustCodexForScope } = await import('./hooks.js');
       const trust = await trustCodexForScope(teamConfig, localConfig);
-      if (!options.silent) reportCodexTrust(trust, 'problems');
+      const skewAlreadyWarned = trust?.skew !== undefined && isDeepStrictEqual(trust.skew, warnedSkew);
+      if (trust?.skew) warnedSkew = trust.skew;
+      if (!options.silent) reportCodexTrust(skewAlreadyWarned ? { ...trust, skew: undefined } : trust, 'problems');
       else if (trust) log.debug(`[${installScopeName(localConfig.scope)}] Codex trust: ${trust.kind}${'reason' in trust ? ` (${trust.reason})` : ''}`);
     } catch (e) {
       log.debug(`[${installScopeName(localConfig.scope)}] Codex trust skipped: ${(e as Error).message}`);

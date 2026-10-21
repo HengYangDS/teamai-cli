@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { realpathSync } from 'node:fs';
-import { lstat, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, readdir, rm } from 'node:fs/promises';
 import { readJson, readJsonObject, writeJson, readFileSafe, writeFile, expandHome, ensureDir, pathExists } from './utils/fs.js';
 import { log } from './utils/logger.js';
 import {
@@ -44,8 +44,10 @@ import { historicalContents } from './utils/team-history.js';
 import { getUserHome } from './utils/home.js';
 import { LEGACY_CLAUDE_HOOK_OTHER_HOST_SKIP, claudeHookOtherHostSkip, copilotRunsEntries } from './claude-hook-host.js';
 import { gitCommonDir, listWorktrees, resolveAnchors } from './utils/git.js';
-import { findOnPath } from './utils/lookpath.js';
-import type { CodexHookTrustReport, CodexTrust } from './codex-trust.js';
+import {
+  codexBuildSkewMessage, codexBuildsIdentity, keepCodexHookTrust, readCodexHookTrust, removeOwnedCodexProjectTrust, trustCodexHooks,
+  type CodexHookTrustReport, type CodexTrust,
+} from './codex-trust.js';
 import { codexDispatcherCheckouts, codexDispatcherProjects, dispatchedCodexHooks, isCodexTeamHookDispatcher, reconcileCodexDispatchers, runsFromCodexDispatcher, setCodexDispatcherHooks } from './codex-team-hooks.js';
 import type { CodexTeamHook } from './codex-team-hooks.js';
 
@@ -270,6 +272,7 @@ export function codexTrustReminder(): string {
  */
 export function reportCodexTrust(trust: CodexTrust | undefined, mode: 'all' | 'problems'): void {
   if (!trust) return;
+  if (trust.skew) log.warn(codexBuildSkewMessage(trust.skew));
   switch (trust.kind) {
     case 'trusted':
       if (trust.hooks > 0 && mode === 'all') log.success(`Trusted ${trust.hooks} teamai hook(s) in Codex`);
@@ -2135,7 +2138,6 @@ export async function editCodexHookFile(
   }
   const dir = path.dirname(file);
   const cwd = canonicalProjectRoot(dir) === canonicalProjectRoot(codexTrust.codexHome) ? getUserHome() : path.dirname(dir);
-  const { keepCodexHookTrust } = await import('./codex-trust.js');
   const trust = await keepCodexHookTrust({ codexHome: codexTrust.codexHome, cwd, file }, retained, write);
   if (trust.kind === 'failed') {
     log.warn(`Codex may skip the hooks that moved in ${file} until you approve them in /hooks: ${trust.reason}`);
@@ -3546,7 +3548,6 @@ export async function trustCodexAgentHook(settingsPath: string, event: string, c
   const groups = (await readJson<CodexHooksJson>(file))?.hooks?.[event] ?? [];
   const index = groups.findIndex((group) => group.hooks?.[0]?.command === command);
   if (index === -1) return { kind: 'failed', reason: `${command} is not in ${file}` };
-  const { trustCodexHooks } = await import('./codex-trust.js');
   return trustCodexHooks({
     codexHome: path.dirname(file),
     cwd: getUserHome(),
@@ -3614,23 +3615,13 @@ async function codexTrustTargets(
 
 /**
  * Everything a trust pass's outcome depends on: what teamai wrote, the bytes of
- * the hook files and of Codex's `config.toml`, and which `codex` binary would
- * answer — an upgrade can change how Codex hashes a hook without touching
- * any file here.
+ * the hook files and of Codex's `config.toml`, and which Codex builds exist —
+ * an upgrade can change how Codex hashes a hook without touching any file here.
  */
 async function codexTrustFingerprint(targets: CodexTrustTargets): Promise<string> {
   const hash = createHash('sha256').update(JSON.stringify({ ...targets, inputs: undefined }));
   for (const file of targets.inputs) hash.update(`\0${file}\0${await readFileSafe(file) ?? ''}`);
-  const codex = findOnPath('codex');
-  if (codex) {
-    try {
-      const real = realpathSync.native(codex);
-      const { mtimeMs, size } = await stat(real);
-      hash.update(`\0${real}\0${mtimeMs}\0${size}`);
-    } catch {
-      hash.update(`\0${codex}`);
-    }
-  }
+  hash.update(`\0${codexBuildsIdentity()}`);
   return hash.digest('hex');
 }
 
@@ -3641,9 +3632,12 @@ async function codexTrustFingerprint(targets: CodexTrustTargets): Promise<string
  * after the MCP reconcile too, so a project whose only Codex content is its MCP
  * servers is trusted by the same pull.
  *
- * Skips the `codex app-server` spawn when the last pass ended `trusted` and
- * none of its inputs changed since (see State.codexTrustFingerprint); `force`
- * runs it anyway. Undefined when there is nothing of teamai's to trust.
+ * Skips the `codex app-server` spawn when the last pass ended `trusted`, every
+ * Codex build listed the hooks or the same builds failed to list them in the
+ * pass before too, and none of its inputs changed since (see
+ * State.codexTrustFingerprint), and then reports the build skew that pass
+ * found; `force` runs it anyway. Undefined when there is nothing of teamai's to
+ * trust.
  */
 export async function trustCodexForScope(
   teamConfig: TeamaiConfig,
@@ -3654,11 +3648,14 @@ export async function trustCodexForScope(
   if (!targets) return undefined;
   if (localConfig.codexTrustEnabled === false) return { kind: 'disabled' };
   const { loadStateForScope, saveStateForScope } = await import('./config.js');
-  const cached = { kind: 'trusted', hooks: 0, ...(targets.project ? { project: targets.project } : {}) } as const;
-  if (!opts.force && (await loadStateForScope(localConfig)).codexTrustFingerprint === await codexTrustFingerprint(targets)) {
-    return cached;
+  const last = await loadStateForScope(localConfig);
+  if (!opts.force && last.codexTrustFingerprint === await codexTrustFingerprint(targets)) {
+    return {
+      kind: 'trusted', hooks: 0,
+      ...(targets.project ? { project: targets.project } : {}),
+      ...(last.codexBuildSkew ? { skew: last.codexBuildSkew } : {}),
+    };
   }
-  const { trustCodexHooks } = await import('./codex-trust.js');
   const trust = await trustCodexHooks({ ...targets, onProjectTrusted: async (project) => {
     const state = await loadStateForScope(localConfig);
     state.codexProjectTrust = [...state.codexProjectTrust ?? []];
@@ -3667,10 +3664,16 @@ export async function trustCodexForScope(
       await saveStateForScope(state, localConfig);
     }
   } });
-  const fingerprint = trust.kind === 'trusted' ? await codexTrustFingerprint(targets) : undefined;
+  const cacheable = trust.kind === 'trusted' && (!trust.uncompared || isDeepStrictEqual(trust.uncompared, last.codexBuildUncompared));
+  const fingerprint = cacheable ? await codexTrustFingerprint(targets) : undefined;
+  const skew = cacheable ? trust.skew : undefined;
+  const uncompared = cacheable ? undefined : trust.uncompared;
   const state = await loadStateForScope(localConfig);
-  if (state.codexTrustFingerprint !== fingerprint) {
+  if (state.codexTrustFingerprint !== fingerprint || !isDeepStrictEqual(state.codexBuildSkew, skew)
+    || !isDeepStrictEqual(state.codexBuildUncompared, uncompared)) {
     state.codexTrustFingerprint = fingerprint;
+    state.codexBuildSkew = skew;
+    state.codexBuildUncompared = uncompared;
     await saveStateForScope(state, localConfig);
   }
   return trust;
@@ -3686,7 +3689,6 @@ export async function readCodexHookTrustForScope(
 ): Promise<CodexHookTrustReport | null> {
   const targets = await codexTrustTargets(teamConfig, localConfig);
   if (!targets || targets.hooks.length === 0) return null;
-  const { readCodexHookTrust } = await import('./codex-trust.js');
   return readCodexHookTrust({ ...targets, cwd: localConfig.projectRoot ?? targets.cwd });
 }
 
@@ -3796,7 +3798,6 @@ async function cleanGitDirectoryHooks(localConfig: LocalConfig, toolPaths: Teama
   const state = await loadStateForScope(localConfig);
   for (const receipt of state.codexProjectTrust ?? []) {
     if (receipt.project !== common) continue;
-    const { removeOwnedCodexProjectTrust } = await import('./codex-trust.js');
     const result = await removeOwnedCodexProjectTrust({ codexHome: receipt.home, project: receipt.project });
     if (result.kind === 'failed' || result.kind === 'unavailable') {
       log.warn(`Could not clean the recorded Codex trust for ${common}: ${result.reason}. Run teamai pull again after fixing Codex.`);
