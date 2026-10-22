@@ -1051,6 +1051,44 @@ describe('workflow handoff through teamai-reports', () => {
     expect(JSON.parse(originFile(acme.origin, `workflows/runs/${runId}/state.json`) ?? '{}')).toMatchObject({ status: 'succeeded', stateRevision: 2 });
   });
 
+  it.each([
+    { status: 'running', end: async () => {} },
+    { status: 'succeeded', end: async (alice: Member, runId: string) => {
+      await work(alice, runId, 'more.txt');
+      await work(alice, runId, 'last.txt');
+      await settle(alice, runId);
+    } },
+    { status: 'failed', end: async (alice: Member, runId: string) => {
+      const next = await leaseNext(alice.config, runId, alice.driver, { workspaceModes: [...WORKSPACES] });
+      if (!('data' in next) || !next.data.lease) throw new Error(`no lease: ${JSON.stringify(next)}`);
+      const lease = next.data.lease as { attempt: string; revision: number };
+      await reportAttempt(alice.config, runId, { attempt: lease.attempt, revision: lease.revision, outcome: 'failed', driver: alice.driver, message: 'broke' });
+      await settle(alice, runId);
+    } },
+    { status: 'cancelled', end: async (alice: Member, runId: string) => {
+      await cancelRun(alice.config, runId);
+    } },
+  ])('needs the branches of a $status run on the business origin to claim it only while it runs', async ({ status, end }) => {
+    const acme = team({ ship: SHIP });
+    const alice = await acme.member('alice');
+    const bob = await acme.member('bob');
+    const runId = await startIn(alice, 'ship');
+    await work(alice, runId, 'write.txt');
+    await publishRun(alice.config, runId, { env: {}, checkout: alice.checkout });
+    await end(alice, runId);
+    expect(JSON.parse(originFile(acme.origin, `workflows/runs/${runId}/state.json`) ?? '{}')).toMatchObject({ status });
+    deleteRunBranches(acme.business, runId);
+
+    const resumed = await resumeRun(bob.config, runId, { claim: false, checkout: bob.checkout });
+    if (status === 'running') {
+      expect(resumed).toMatchObject({ ok: false, error: { code: 'commit_missing' } });
+      expect(await readRun(bob.config, runId)).toBe('missing');
+      return;
+    }
+    expect(resumed).toMatchObject({ ok: true, value: { ownership: 'claimed' } });
+    expect(await runLocalDriver(bob.config, runId, bob.checkout, { hitl: false })).toMatchObject({ data: { done: { outcome: status } } });
+  });
+
   it('does not touch the business origin when a cancel finds the run already ended', async () => {
     const { acme, alice, runId } = await finishedCopyRun();
     deleteRunBranches(acme.business, runId);

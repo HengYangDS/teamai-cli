@@ -254,21 +254,20 @@ describe('workflow publish and resume across members', () => {
     expect(resumed.envelope()).toMatchObject({ error: { code: 'not_owner', owner: bobs } });
     expect(resumed.envelope().error?.message).toContain(`teamai workflow resume ${shipRun} --claim`);
 
-    // The step alice stopped left its write in her copy's worktree, which teamai does not discard.
+    // The step alice stopped left its write in her copy's worktree. The run bob finished leases nothing, so taking it
+    // back leaves that copy as it is.
     const copy = `teamai/${shipRun}/change/p1`;
-    const claimed = await teamai('alice', ['workflow', 'resume', shipRun, '--claim']);
-    expect(claimed.code, said(claimed)).toBe(1);
-    expect(claimed.envelope()).toMatchObject({ error: { code: 'branch_diverged', message: expect.stringContaining('has changes') } });
-    expect(publishedState(shipRun).owner.id).not.toBe(bobs.id);
     const worktrees = git(workOf('alice'), ['worktree', 'list', '--porcelain']).split('\n\n');
-    const stale = worktrees.find((entry) => entry.includes(`branch refs/heads/${copy}`))?.match(/^worktree (.+)$/m)?.[1];
-    expect(stale, worktrees.join('\n\n')).toBeDefined();
-    git(workOf('alice'), ['worktree', 'remove', '--force', stale ?? ''], envOf('alice'));
+    const stale = worktrees.find((entry) => entry.includes(`branch refs/heads/${copy}`))?.match(/^worktree (.+)$/m)?.[1] ?? '';
+    expect(stale, worktrees.join('\n\n')).not.toBe('');
+    const left = { tip: git(workOf('alice'), ['rev-parse', copy]), status: git(stale, ['status', '--porcelain']) };
+    expect(left.status).not.toBe('');
 
-    const continued = await teamai('alice', ['workflow', 'resume', shipRun]);
-    expect(continued.code, said(continued)).toBe(0);
-    expect(continued.envelope()).toMatchObject({ data: { done: { run: shipRun, outcome: 'succeeded' } } });
-    expect(git(workOf('alice'), ['rev-parse', copy]), 'alice brought her copy to the commit bob recorded').toBe(originGit(businessOrigin, 'rev-parse', copy));
+    const claimed = await teamai('alice', ['workflow', 'resume', shipRun, '--claim']);
+    expect(claimed.code, said(claimed)).toBe(0);
+    expect(claimed.envelope()).toMatchObject({ data: { done: { run: shipRun, outcome: 'succeeded' } } });
+    expect(publishedState(shipRun).owner.id).not.toBe(bobs.id);
+    expect({ tip: git(workOf('alice'), ['rev-parse', copy]), status: git(stale, ['status', '--porcelain']) }).toEqual(left);
 
     const published = await teamai('alice', ['workflow', 'publish', shipRun]);
     expect(published.code, said(published)).toBe(0);

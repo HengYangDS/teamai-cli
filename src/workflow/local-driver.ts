@@ -863,11 +863,12 @@ export async function withDriverLock(
 
 /**
  * Once after this machine took run `runId` over, before its first lease: brings the local branch of each copy the run
- * recorded a commit for to that commit, fetched the way a lease fetches what it lacks.
+ * recorded a commit for to that commit, fetched the way a lease fetches what it lacks. A settled run waits for a retry
+ * to reopen it, since it leases nothing before that.
  */
 async function reconcileTakenCopies(config: LocalConfig, runId: string, active: string): Promise<WorkflowFailure | undefined> {
   const run = await readRun(config, runId);
-  if (typeof run !== 'object' || !run.publication?.reconcileCopies) return undefined;
+  if (typeof run !== 'object' || !run.publication?.reconcileCopies || run.status !== 'running') return undefined;
   const recorded = Object.entries(run.copies ?? {}).flatMap(([branch, copy]) => (copy.commit === undefined ? [] : [{ branch, commit: copy.commit }]));
   const fetched = await fetchMissingCommits(active, { run: runId, commits: recorded.map((copy) => copy.commit) });
   if (fetched.missing.length > 0) {

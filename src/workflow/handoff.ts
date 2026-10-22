@@ -644,8 +644,12 @@ async function decideClaim(
   const definitions = await definitionsOf(config, origin);
   if (!definitions.ok) return definitions;
   const handed = handedOver(origin, definitions.value);
-  const onOrigin = await checkOrigin(checkout, { id: runId, base: origin.base, copies: handed.copies }, { side: 'claim', publisher: origin.owner });
-  if (!onOrigin.ok) return onOrigin;
+  // A settled run leases nothing until a retry reopens it, so its branches, which a merge may have deleted, are needed
+  // only then: the first drive after the retry fetches and reconciles them.
+  if (origin.status === 'running') {
+    const onOrigin = await checkOrigin(checkout, { id: runId, base: origin.base, copies: handed.copies }, { side: 'claim', publisher: origin.owner });
+    if (!onOrigin.ok) return onOrigin;
+  }
   const claimed: RunSnapshot = { ...header(runId, owner, new Date().toISOString(), origin.stateRevision + 1, snapshotBody(origin)), ...handed };
   return ok({ kind: 'claimed', snapshot: claimed, replaces: origin.write, definitions: definitions.value, handed });
 }
