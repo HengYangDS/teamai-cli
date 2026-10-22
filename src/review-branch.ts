@@ -16,9 +16,9 @@
  * scanners (`scanTeamForPull`), the same manifest loaders, the same
  * `NAMESPACE_AXIS` mapping, the same agent parser and the same secret
  * scrubber — so a branch this command calls clean is one pull reads the same
- * way. Workflow files reuse `syncWorkflowDefinitions` with dry-run and an
- * empty data home, and that check does not update this machine's workflow
- * cache. It deliberately does not re-implement any of that.
+ * way. Workflow and scorer files reuse `syncWorkflowDefinitions` with dry-run
+ * and an empty data home, and that check does not update this machine's
+ * caches. It deliberately does not re-implement any of that.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +36,7 @@ import { parseAgentYaml } from './resources/agent-format.js';
 import { hooksEntryReader } from './resources/hooks.js';
 import { getHandler } from './resources/index.js';
 import { listRepoFilesRecursive } from './resources/repo-resource.js';
+import { isNamespaceDir } from './resource-namespaces.js';
 import { loadRolesManifestIfPresent, type RolesManifest } from './roles.js';
 import { LocalConfigSchema, type GlobalOptions, type LocalConfig, type ResourceItem, type TeamaiConfig } from './types.js';
 import { splitFrontmatter } from './utils/frontmatter.js';
@@ -45,6 +46,7 @@ import { isSilent, log, setSilent } from './utils/logger.js';
 import { redact } from './utils/redact.js';
 import { syncWorkflowDefinitions } from './workflow/cache.js';
 import { formatDiagnostic } from './workflow/parse.js';
+import { formatScorerDiagnostic } from './scorers/definition.js';
 
 // ─── Findings ────────────────────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ import { formatDiagnostic } from './workflow/parse.js';
 export type FindingLevel = 'fail' | 'warn' | 'info';
 
 /** Which group of checks produced a finding. */
-export type FindingCheck = 'structure' | 'naming' | 'duplicates' | 'format' | 'leaks' | 'workflows';
+export type FindingCheck = 'structure' | 'naming' | 'duplicates' | 'format' | 'leaks' | 'workflows' | 'scorers';
 
 /** One thing worth reporting about the branch. */
 export interface Finding {
@@ -110,21 +112,20 @@ function parseRelativePath(
     const only = rest[0] ?? '';
     return { name: isNestedPlaceableType(type) ? only : stripExtension(only) };
   }
-  const namespace = rest[0];
+  const namespace = rest[0] ?? '';
   // Nested types keep the whole bundle-relative sub-path as the identity, never
   // the bare basename: co-active docs/a/api/guide.md and docs/b/ui/guide.md are
   // two resources, not a duplicate "guide", and the extension stays because
   // docs/a/api/guide.md and docs/b/api/guide.png are distinct files. The name
   // may contain '/', which namingFindings validates one segment at a time.
   if (isNestedPlaceableType(type)) {
-    if (index.declares(NAMESPACE_AXIS[type], namespace!)) {
+    if (isNamespaceDir(type, namespace, index)) {
       return { name: rest.slice(1).join('/'), namespace };
     }
     return { name: rest.join('/') };
   }
-  // A first segment under the other roots is a namespace by construction
-  // (`skills/<ns>/<name>`), so the name is the basename below it.
-  return { name: stripExtension(rest[rest.length - 1] ?? ''), namespace };
+  const name = stripExtension(rest[rest.length - 1] ?? '');
+  return isNamespaceDir(type, namespace, index) ? { name, namespace } : { name };
 }
 
 /** Enumerate the resources on the branch through the same scanners pull uses. */
@@ -446,6 +447,21 @@ function duplicateFindings(resources: ReviewResource[], index: ManifestIndex): F
   }
 
   const findings: Finding[] = [];
+  const sharedScorers = new Map<string, ReviewResource[]>();
+  for (const resource of resources) {
+    if (resource.type === 'scorers' && !resource.namespace) byKey(sharedScorers, caseFoldKey(resource.name)).push(resource);
+  }
+  for (const group of sharedScorers.values()) {
+    const [first, ...rest] = group.sort((a, b) => (a.relativePath < b.relativePath ? -1 : 1));
+    for (const other of first ? rest : []) {
+      findings.push({
+        level: 'fail',
+        check: 'duplicates',
+        path: other.relativePath,
+        message: `"${first.name}" is a shared scorer in both ${first.relativePath} and ${other.relativePath}, so pull caches neither. Rename or remove one of them.`,
+      });
+    }
+  }
   for (const group of byTypeAndName.values()) {
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
@@ -477,46 +493,50 @@ function byKey<K, V>(map: Map<K, V[]>, key: K): V[] {
 
 const MAX_SCANNED_FILE_BYTES = 512 * 1024;
 
-async function leakFindings(resources: ReviewResource[], readText: (p: string) => Promise<string | null>): Promise<Finding[]> {
+async function filesUnder(relativeDir: string, absoluteDir: string): Promise<Array<{ relativePath: string; absolutePath: string }>> {
+  return (await listFilesRecursive(absoluteDir)).map((rel) => ({
+    relativePath: `${relativeDir}/${rel}`,
+    absolutePath: path.join(absoluteDir, ...rel.split('/')),
+  }));
+}
+
+async function leakFindings(repoDir: string, resources: ReviewResource[], readText: (p: string) => Promise<string | null>): Promise<Finding[]> {
+  const files = [
+    ...(await Promise.all(resources.map((resource) => resource.type === 'skills'
+      ? filesUnder(resource.relativePath, resource.absolutePath)
+      : [{ relativePath: resource.relativePath, absolutePath: resource.absolutePath }]))).flat(),
+    ...await filesUnder('scorers', path.join(repoDir, 'scorers')),
+  ];
   const findings: Finding[] = [];
   // Several resources can share one file (every hook entry in a hooks.yaml is
   // its own resource); its contents are checked once, not once per entry.
   const seenFiles = new Set<string>();
-  for (const resource of resources) {
-    const files = resource.type === 'skills'
-      ? (await listFilesRecursive(resource.absolutePath)).map((rel) => ({
-        relativePath: `${resource.relativePath}/${rel}`,
-        absolutePath: path.join(resource.absolutePath, ...rel.split('/')),
-      }))
-      : [{ relativePath: resource.relativePath, absolutePath: resource.absolutePath }];
+  for (const file of files) {
+    if (seenFiles.has(file.absolutePath)) continue;
+    seenFiles.add(file.absolutePath);
+    const content = await readText(file.absolutePath);
+    if (content === null || content.length > MAX_SCANNED_FILE_BYTES || content.includes('\0')) continue;
 
-    for (const file of files) {
-      if (seenFiles.has(file.absolutePath)) continue;
-      seenFiles.add(file.absolutePath);
-      const content = await readText(file.absolutePath);
-      if (content === null || content.length > MAX_SCANNED_FILE_BYTES || content.includes('\0')) continue;
+    const redacted = redact(content);
+    if (redacted !== content) {
+      const labels = redactedLabels(redacted);
+      findings.push({
+        level: 'fail',
+        check: 'leaks',
+        path: file.relativePath,
+        message: `${file.relativePath} looks like it carries a credential (${labels.join(', ') || 'redacted'}); `
+          + 'remove it before this branch is merged.',
+      });
+    }
 
-      const redacted = redact(content);
-      if (redacted !== content) {
-        const labels = redactedLabels(redacted);
-        findings.push({
-          level: 'fail',
-          check: 'leaks',
-          path: file.relativePath,
-          message: `${file.relativePath} looks like it carries a credential (${labels.join(', ') || 'redacted'}); `
-            + 'remove it before this branch is merged.',
-        });
-      }
-
-      const addresses = [...new Set([...content.matchAll(INTERNAL_ADDRESS)].map((match) => match[0]))];
-      if (addresses.length > 0) {
-        findings.push({
-          level: 'fail',
-          check: 'leaks',
-          path: file.relativePath,
-          message: `${file.relativePath} contains an internal address (${addresses.join(', ')}); confirm it is safe to share before merging.`,
-        });
-      }
+    const addresses = [...new Set([...content.matchAll(INTERNAL_ADDRESS)].map((match) => match[0]))];
+    if (addresses.length > 0) {
+      findings.push({
+        level: 'fail',
+        check: 'leaks',
+        path: file.relativePath,
+        message: `${file.relativePath} contains an internal address (${addresses.join(', ')}); confirm it is safe to share before merging.`,
+      });
     }
   }
   return findings;
@@ -535,23 +555,31 @@ function reviewTreeConfig(repoDir: string, dataHome: string): LocalConfig {
   return { ...parsed, dataHome };
 }
 
-/** Invalid workflow files. Dry-run, so the call does not write a cache. */
+/** Invalid workflow and scorer files. Dry-run, so the call does not write a cache. */
 async function workflowFindings(repoDir: string): Promise<Finding[]> {
   const dataHome = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-review-workflows-'));
   const wasSilent = isSilent();
   setSilent(true);
   try {
-    // Note: When #1085 adds scorers/, their validation diagnostics will join here.
     const result = await syncWorkflowDefinitions(reviewTreeConfig(repoDir, dataHome), {
       dryRun: true,
+      everyNamespace: true,
       scopeLabel: 'review',
     });
-    return result.invalid.map((diagnostic) => ({
-      level: 'fail',
-      check: 'workflows',
-      path: diagnostic.file,
-      message: formatDiagnostic(diagnostic),
-    }));
+    return [
+      ...result.scorers.invalid.map((diagnostic): Finding => ({
+        level: 'fail',
+        check: 'scorers',
+        path: diagnostic.file,
+        message: formatScorerDiagnostic(diagnostic),
+      })),
+      ...result.invalid.map((diagnostic): Finding => ({
+        level: 'fail',
+        check: 'workflows',
+        path: diagnostic.file,
+        message: formatDiagnostic(diagnostic),
+      })),
+    ];
   } finally {
     setSilent(wasSilent);
     await fse.remove(dataHome);
@@ -575,7 +603,7 @@ export async function reviewBranchDir(branch: string, repoDir: string): Promise<
     ...await namingFindings(resources, readText),
     ...await duplicateFindings(resources, index),
     ...await formatFindings(resources, readText),
-    ...await leakFindings(resources, readText),
+    ...await leakFindings(repoDir, resources, readText),
     ...await workflowFindings(repoDir),
   ];
 
