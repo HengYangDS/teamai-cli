@@ -57,9 +57,6 @@ sharing:
         timeout: 5000
         retries: 3
 
-scoring:
-  batch: false               # true：步骤的评分器共用一次评审调用，除非步骤或工作流另有设置
-  isolation: best-effort      # verified：团队评分器的所有评审都必须是 verified
 ```
 
 ### config.yaml（本地配置）
