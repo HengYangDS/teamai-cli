@@ -16,7 +16,9 @@ import {
 import { isInteractive } from '../utils/prompt.js';
 import { setStderrOnly } from '../utils/logger.js';
 import {
+  REPORTS_ARCHIVE_BUSY,
   archiveBusyMessage,
+  archiveToReports,
   ask,
   authorForCwd,
   closeStdin,
@@ -85,7 +87,7 @@ export function registerMigrationCommand(sessionCmd: Command, isDryRun: () => bo
     .option('--cwd <path>', 'Working directory (defaults to current directory)')
     .option('--target-cwd <path>', 'Override cwd for the target session')
     .option('--push', 'Also push the migrated session to the team repo')
-    .option('--repo-root <path>', 'Team repo root (for --push)')
+    .option('--repo-root <path>', 'Team repo clone to archive into with --push (default: the teamai install for this directory, else your user install)')
     .option('--scrub', 'Redact secrets (tokens/keys/passwords) from the session before writing it')
     .option('--all', 'Migrate every session from source (not just the 5 most recent)')
     .option('--limit <n>', 'Max sessions to migrate (only caps --all; ignored otherwise)')
@@ -426,96 +428,144 @@ export function registerMigrationCommand(sessionCmd: Command, isDryRun: () => bo
           }
           return;
         }
-        const repoRoot = await resolveRepoRoot(opts.repoRoot, { materialize: !isDryRun() });
+        /** --json: the copy stays on this machine whatever happens to its archive, so say where it is. */
+        const archiveFailed = (code: string, reason: string) =>
+          printEnvelope({ error: { code, message: `Copied as ${copied?.sessionId} in ${copied?.cwd}, but not archived: ${reason}` } });
+        let archive: Awaited<ReturnType<typeof resolveRepoRoot>>;
+        try {
+          archive = await resolveRepoRoot(opts.repoRoot, { dryRun: isDryRun() });
+        } catch (err) {
+          if (!json) throw err;
+          return archiveFailed('archive_failed', err instanceof Error ? err.message : String(err));
+        }
+        const { root: repoRoot, reports } = archive;
         // When expanded across directories, sessions do not belong to workCwd; author should come from the repo the session actually lives in
         const authorCwd = migratedTargets.find((t) => t.cwd)?.cwd ?? workCwd;
         const author = getGitAuthor(authorCwd);
 
-        const syncMgr = new SyncManager(repoRoot);
-        /** --json: the copy stays on this machine whatever happens to its archive, so say where it is. */
-        const archiveFailed = (code: string, reason: string) =>
-          printEnvelope({ error: { code, message: `Copied as ${copied?.sessionId} in ${copied?.cwd}, but not archived: ${reason}` } });
-        let saved = 0;
-        let unarchived = 0;
-        for (const t of migratedTargets) {
-          // Migration keeps image paths so the target can still open the file.
-          // The copy that lands in the team repo must not: re-read the target
-          // and scrub again with the archive default, which drops filePath.
-          const readBack = await AgentSession.find(
-            { platform: target, sessionId: t.sessionId, cwd: t.cwd ?? opts.targetCwd ?? workCwd },
-            { scrub: Boolean(opts.scrub), toolRootsFor },
-          );
-          if (readBack.status === 'failed') {
-            if (json) return archiveFailed(readBack.failure.code, readBack.failure.message);
-            console.error(`\n  ✗ Not archived: ${readBack.failure.message}`);
-            unarchived++;
-            continue;
+        /** Saves the migrated sessions into the archive at `root`: how many, or undefined once a failure that stops the archive was reported. */
+        const archiveInto = async (syncMgr: SyncManager, root: string): Promise<number | undefined> => {
+          let saved = 0;
+          let unarchived = 0;
+          for (const t of migratedTargets) {
+            // Migration keeps image paths so the target can still open the file.
+            // The copy that lands in the team repo must not: re-read the target
+            // and scrub again with the archive default, which drops filePath.
+            const readBack = await AgentSession.find(
+              { platform: target, sessionId: t.sessionId, cwd: t.cwd ?? opts.targetCwd ?? workCwd },
+              { scrub: Boolean(opts.scrub), toolRootsFor },
+            );
+            if (readBack.status === 'failed') {
+              if (json) {
+                archiveFailed(readBack.failure.code, readBack.failure.message);
+                return undefined;
+              }
+              console.error(`\n  ✗ Not archived: ${readBack.failure.message}`);
+              unarchived++;
+              continue;
+            }
+            const session = readBack.session;
+            // P3: the archive key is derived from the session's native cwd, not the directory migrate is running in (see deriveArchiveIdentity)
+            const meta = defaultSyncMeta(
+              {
+                platform: target,
+                author: authorForCwd(session.cwd ?? t.cwd, author),
+                cwd: session.cwd || opts.targetCwd || workCwd,
+                sessionId: t.sessionId,
+                repoIdentity: deriveArchiveIdentity(session, target),
+                title: session.title,
+              },
+              session.createdAt,
+            );
+            meta.migration.migratedAt = new Date().toISOString();
+            meta.migration.sourcePlatform = source;
+            meta.migration.targetPlatform = target;
+            meta.migration.fidelityScore = t.fidelityScore;
+            try {
+              const write = await withSessionIndexLock(root, async () => syncMgr.saveSession(session, meta));
+              if (write.status === 'busy') {
+                if (json) archiveFailed('busy', `${archiveBusyMessage(root, write.lockPath)} Run it again once that has finished.`);
+                else reportArchiveBusy(root, write.lockPath);
+                return undefined;
+              }
+            } catch (err) {
+              const reason = err instanceof Error ? err.message : String(err);
+              if (json) {
+                archiveFailed('archive_failed', reason);
+                return undefined;
+              }
+              console.error(`Error: ${reason}`);
+              process.exitCode = 1;
+              return undefined;
+            }
+            saved++;
           }
-          const session = readBack.session;
-          // P3: the archive key is derived from the session's native cwd, not the directory migrate is running in (see deriveArchiveIdentity)
-          const meta = defaultSyncMeta(
-            {
-              platform: target,
-              author: authorForCwd(session.cwd ?? t.cwd, author),
-              cwd: session.cwd || opts.targetCwd || workCwd,
-              sessionId: t.sessionId,
-              repoIdentity: deriveArchiveIdentity(session, target),
-              title: session.title,
-            },
-            session.createdAt,
-          );
-          meta.migration.migratedAt = new Date().toISOString();
-          meta.migration.sourcePlatform = source;
-          meta.migration.targetPlatform = target;
-          meta.migration.fidelityScore = t.fidelityScore;
-          try {
-            const write = await withSessionIndexLock(repoRoot, async () => syncMgr.saveSession(session, meta));
-            if (write.status === 'busy') {
-              if (json) return archiveFailed('busy', `${archiveBusyMessage(repoRoot, write.lockPath)} Run it again once that has finished.`);
-              reportArchiveBusy(repoRoot, write.lockPath);
+          if (unarchived > 0) {
+            console.error(`\n  ✗ ${unarchived} migrated session(s) could not be read back and were not archived.`);
+            process.exitCode = 1;
+          }
+          return saved;
+        };
+        const commitMessage = (saved: number) => `sync: migrate ${saved} session(s) ${source}→${target}`;
+        if (reports) {
+          const archived = await archiveToReports(reports, archiveInto, commitMessage);
+          switch (archived.status) {
+            case 'busy':
+              if (json) return archiveFailed('busy', REPORTS_ARCHIVE_BUSY);
+              console.error(`Error: ${REPORTS_ARCHIVE_BUSY}`);
+              process.exitCode = 1;
               return;
-            }
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            if (json) return archiveFailed('archive_failed', reason);
-            console.error(`Error: ${reason}`);
-            process.exitCode = 1;
-            return;
-          }
-          saved++;
-        }
-        if (unarchived > 0) {
-          console.error(`\n  ✗ ${unarchived} migrated session(s) could not be read back and were not archived.`);
-          process.exitCode = 1;
-        }
-        // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
-        // Under --json a throw reaches the action's catch, which prints the envelope; runGitStep would exit without one.
-        const commitArchive = () => syncMgr.gitCommit(`sync: migrate ${saved} session(s) ${source}→${target}`);
-        const commit = json ? commitArchive() : runGitStep(commitArchive, repoRoot, 'git commit');
-        if (commit.status === 'committed') {
-          const pushed = await pushToRemote(syncMgr, repoRoot);
-          if (pushed) {
-            console.log(`\n  ✓ Pushed ${saved} session(s) to team repo`);
-          } else {
-            console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
-            process.exitCode = 1;
-            if (json) {
-              return archiveFailed(
-                'archive_failed',
-                `committed in ${repoRoot} as ${commit.commit.slice(0, 8)}, but the push to the remote failed (reason on stderr).`,
-              );
+            case 'stopped':
+              return;
+            case 'published':
+              console.log(`\n  ✓ Pushed ${archived.saved} session(s) to team repo`);
+              break;
+            case 'already-present':
+              console.log(`\n  · No changes to push\n`);
+              break;
+            case 'failed':
+              console.error(`\n  ✗ ${archived.saved} session(s) not pushed to teamai-reports: ${safeText(archived.reason)}`);
+              process.exitCode = 1;
+              if (json) return archiveFailed('archive_failed', `the push to teamai-reports failed: ${safeText(archived.reason)}`);
+              break;
+            default: {
+              const unhandled: never = archived;
+              return unhandled;
             }
           }
-          console.log(`  commit: ${commit.commit.slice(0, 8)}`);
-        } else if (commit.status === 'failed') {
-          // Hooks / gpg / missing identity: the archive files are still
-          // staged. Say so, and fail -- "No changes to push" here would hide
-          // a broken archive.
-          console.error(`\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`);
-          process.exitCode = 1;
-          if (json) return archiveFailed('archive_failed', `the commit failed, files left staged in ${repoRoot}: ${safeText(commit.reason)}`);
         } else {
-          console.log(`\n  · No changes to push\n`);
+          const syncMgr = new SyncManager(repoRoot);
+          const saved = await archiveInto(syncMgr, repoRoot);
+          if (saved === undefined) return;
+          // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
+          // Under --json a throw reaches the action's catch, which prints the envelope; runGitStep would exit without one.
+          const commitArchive = () => syncMgr.gitCommit(commitMessage(saved));
+          const commit = json ? commitArchive() : runGitStep(commitArchive, repoRoot, 'git commit');
+          if (commit.status === 'committed') {
+            const pushed = await pushToRemote(syncMgr, repoRoot);
+            if (pushed) {
+              console.log(`\n  ✓ Pushed ${saved} session(s) to team repo`);
+            } else {
+              console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
+              process.exitCode = 1;
+              if (json) {
+                return archiveFailed(
+                  'archive_failed',
+                  `committed in ${repoRoot} as ${commit.commit.slice(0, 8)}, but the push to the remote failed (reason on stderr).`,
+                );
+              }
+            }
+            console.log(`  commit: ${commit.commit.slice(0, 8)}`);
+          } else if (commit.status === 'failed') {
+            // Hooks / gpg / missing identity: the archive files are still
+            // staged. Say so, and fail -- "No changes to push" here would hide
+            // a broken archive.
+            console.error(`\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`);
+            process.exitCode = 1;
+            if (json) return archiveFailed('archive_failed', `the commit failed, files left staged in ${repoRoot}: ${safeText(commit.reason)}`);
+          } else {
+            console.log(`\n  · No changes to push\n`);
+          }
         }
       }
 

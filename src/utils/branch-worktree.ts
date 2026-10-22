@@ -286,7 +286,7 @@ async function openWorktree(
       await writeWorktreeGitignore(wt);
       const wtGit = createGitWithBlockTimeout(wt);
       await wtGit.add(['.gitignore']);
-      await commitSkippingHooks(wtGit, spec.initCommitMessage);
+      await commitSkippingHooks(wtGit, spec.initCommitMessage, undefined, { identityFallback: true });
     }
     if (options.pushIfCreated !== false) {
       try {
@@ -631,7 +631,7 @@ async function commitAndPushAt(
 
   // A retry may reconstruct the same tree as a previously committed
   // but unconfirmed push. It still needs a push, without an empty commit.
-  if (staged > 0) await commitSkippingHooks(git, message, files);
+  if (staged > 0) await commitSkippingHooks(git, message, files, { identityFallback: true });
 
   // Push with fetch+rebase retry. Each member only writes <user>.yaml, so
   // rebase conflicts are effectively impossible; retries handle the pure
@@ -734,13 +734,13 @@ export interface BranchWriteContext {
  *
  * `write` receives the worktree root (plus a context to register
  * `onDelivered` work) and returns the worktree-relative paths it touched, or
- * null when it decided there was nothing to write.
+ * null when it decided there was nothing to write and nothing to push.
  */
 async function updateImpl(
   spec: BranchWorktreeSpec,
   localConfig: LocalConfig,
   write: (worktree: string, ctx: BranchWriteContext) => Promise<BranchWrite | null>,
-  options: BranchPushOptions = {},
+  options: BranchPushOptions & EnsureWorktreeOptions = {},
 ): Promise<PublishResult> {
   if (!usesBranchWorktree(localConfig)) {
     throw new Error(`update() needs a branch-backed repo, and ${spec.branch} has none for kind: 'http'`);
@@ -753,7 +753,7 @@ async function updateImpl(
   }
 
   try {
-    const { wt, current } = await openWorktree(spec, localConfig);
+    const { wt, current } = await openWorktree(spec, localConfig, options);
     try {
       if (!current) await syncWorktree(spec, wt);
     } catch (e) {
@@ -766,12 +766,11 @@ async function updateImpl(
         if (!delivered) delivered = fn;
       },
     });
-    let result: PublishResult;
-    if (!change || change.files.length === 0) {
-      result = { status: 'already-present' };
-    } else {
-      result = await commitAndPushAt(spec, wt, change.message, change.files, options);
-    }
+    // null writes and pushes nothing, so a read or a refusal under the lock stays without effect on origin. An empty
+    // list still asks commitAndPushAt, which pushes a commit an earlier attempt left unpushed.
+    const result: PublishResult = change === null
+      ? { status: 'already-present' }
+      : await commitAndPushAt(spec, wt, change.message, change.files, options);
     if (delivered && isDelivered(result)) {
       try {
         await delivered();
@@ -1136,7 +1135,7 @@ export interface BranchWorktree {
   update(
     localConfig: LocalConfig,
     write: (worktree: string, ctx: BranchWriteContext) => Promise<BranchWrite | null>,
-    options?: BranchPushOptions,
+    options?: BranchPushOptions & EnsureWorktreeOptions,
   ): Promise<PublishResult>;
   commitAndPush(
     localConfig: LocalConfig,
