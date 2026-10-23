@@ -27,7 +27,7 @@ import {
   toolRootsLookup,
   writeCopyOnce,
 } from './agent-session.js';
-import { SyncManager, getGitAuthor, defaultSyncMeta, withSessionIndexLock } from './sync.js';
+import { SyncManager, getGitAuthor, defaultSyncMeta, withSessionIndexLock, withSessionPublicationLock } from './sync.js';
 import { SessionSearchEngine, type LoadedSession } from './search.js';
 import { isSafeSessionFileId } from './ids.js';
 import { isInteractive } from '../utils/prompt.js';
@@ -243,57 +243,61 @@ export function registerSessionFlowCommands(sessionCmd: Command): void {
         }
         return saved;
       };
-      if (reports) {
-        const archived = await archiveToReports(reports, archiveInto, commitMessage);
-        switch (archived.status) {
-          case 'busy':
-            console.error(`Error: ${REPORTS_ARCHIVE_BUSY}`);
-            process.exitCode = 1;
-            return;
-          case 'stopped':
-            return;
-          case 'published':
-            console.log(`\n  ✓ Pushed ${archived.saved} session(s) from ${source}\n`);
-            return;
-          case 'already-present':
-            console.log(`\n  · No changes to push\n`);
-            return;
-          case 'failed':
-            console.error(`\n  ✗ ${archived.saved} session(s) not pushed to teamai-reports: ${safeText(archived.reason)}`);
-            process.exitCode = 1;
-            return;
-          default: {
-            const unhandled: never = archived;
-            return unhandled;
+      // Archive changes and their Git publication are serialized per team repo, the teamai-reports archive included.
+      const publication = await withSessionPublicationLock(repoRoot, async () => {
+        if (reports) {
+          const archived = await archiveToReports(reports, archiveInto, commitMessage);
+          switch (archived.status) {
+            case 'busy':
+              console.error(`Error: ${REPORTS_ARCHIVE_BUSY}`);
+              process.exitCode = 1;
+              return;
+            case 'stopped':
+              return;
+            case 'published':
+              console.log(`\n  ✓ Pushed ${archived.saved} session(s) from ${source}\n`);
+              return;
+            case 'already-present':
+              console.log(`\n  · No changes to push\n`);
+              return;
+            case 'failed':
+              console.error(`\n  ✗ ${archived.saved} session(s) not pushed to teamai-reports: ${safeText(archived.reason)}`);
+              process.exitCode = 1;
+              return;
+            default: {
+              const unhandled: never = archived;
+              return unhandled;
+            }
           }
         }
-      }
-      const syncMgr = new SyncManager(repoRoot);
-      const saved = await archiveInto(syncMgr, repoRoot);
-      if (saved === undefined) return;
-      // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
-      const commit = runGitStep(
-        () => syncMgr.gitCommit(commitMessage(saved)),
-        repoRoot,
-        'git commit',
-      );
-      if (commit.status === 'committed') {
-        const pushed = await pushToRemote(syncMgr, repoRoot);
-        if (pushed) {
-          console.log(`\n  ✓ Pushed ${saved} session(s) from ${source}`);
-        } else {
-          console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
-          process.exitCode = 1;
-        }
-        console.log(`  commit: ${commit.commit.slice(0, 8)}\n`);
-      } else if (commit.status === 'failed') {
-        console.error(
-          `\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`,
+        const syncMgr = new SyncManager(repoRoot);
+        const saved = await archiveInto(syncMgr, repoRoot);
+        if (saved === undefined) return;
+        // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
+        const commit = runGitStep(
+          () => syncMgr.gitCommit(commitMessage(saved)),
+          repoRoot,
+          'git commit',
         );
-        process.exitCode = 1;
-      } else {
-        console.log(`\n  · No changes to push\n`);
-      }
+        if (commit.status === 'committed') {
+          const pushed = await pushToRemote(syncMgr, repoRoot);
+          if (pushed) {
+            console.log(`\n  ✓ Pushed ${saved} session(s) from ${source}`);
+          } else {
+            console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
+            process.exitCode = 1;
+          }
+          console.log(`  commit: ${commit.commit.slice(0, 8)}\n`);
+        } else if (commit.status === 'failed') {
+          console.error(
+            `\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`,
+          );
+          process.exitCode = 1;
+        } else {
+          console.log(`\n  · No changes to push\n`);
+        }
+      });
+      if (publication.status === 'busy') reportArchiveBusy(repoRoot, publication.lockPath);
       } finally {
         closeStdin();
       }
@@ -345,25 +349,29 @@ export function registerSessionFlowCommands(sessionCmd: Command): void {
         }
         return true;
       };
-      if (!reports) {
-        if (!(await pullInto(repoRoot))) process.exit(1);
-        return;
-      }
-      // Pulling merges into the teamai-reports checkout, so it runs under the lock every writer there takes.
-      let pulled = true;
-      const result = await updateReports(reports, async (worktree) => {
-        pulled = await pullInto(worktree);
-        return null;
+      // Archive changes and their Git publication are serialized per team repo, the teamai-reports archive included.
+      const publication = await withSessionPublicationLock(repoRoot, async (): Promise<boolean> => {
+        if (!reports) return pullInto(repoRoot);
+        // Pulling merges into the teamai-reports checkout, so it runs under the lock every writer there takes.
+        let pulled = true;
+        const result = await updateReports(reports, async (worktree) => {
+          pulled = await pullInto(worktree);
+          return null;
+        });
+        if (result.status === 'busy') {
+          console.error('Error: Another teamai command is writing teamai-reports, so nothing was pulled. Run this command again once it has finished.');
+          process.exitCode = 1;
+          return true;
+        }
+        if (result.status === 'failed') {
+          console.error(`Error: ${safeText(result.reason)}`);
+          process.exitCode = 1;
+          return true;
+        }
+        return pulled;
       });
-      if (result.status === 'busy') {
-        console.error('Error: Another teamai command is writing teamai-reports, so nothing was pulled. Run this command again once it has finished.');
-        process.exitCode = 1;
-      } else if (result.status === 'failed') {
-        console.error(`Error: ${safeText(result.reason)}`);
-        process.exitCode = 1;
-      } else if (!pulled) {
-        process.exit(1);
-      }
+      if (publication.status === 'busy') reportArchiveBusy(repoRoot, publication.lockPath);
+      else if (!publication.value) process.exit(1);
     });
 
   // ── session list ───────────────────────────────────────────

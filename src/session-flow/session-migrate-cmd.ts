@@ -12,6 +12,7 @@ import {
   getGitAuthor,
   defaultSyncMeta,
   withSessionIndexLock,
+  withSessionPublicationLock,
 } from './sync.js';
 import { isInteractive } from '../utils/prompt.js';
 import { setStderrOnly } from '../utils/logger.js';
@@ -506,63 +507,68 @@ async function migrateSession(sessionId: string | undefined, opts: MigrationOpti
         return saved;
       };
       const commitMessage = (saved: number) => `sync: migrate ${saved} session(s) ${source}→${target}`;
-      if (reports) {
-        const archived = await archiveToReports(reports, archiveInto, commitMessage);
-        switch (archived.status) {
-          case 'busy':
-            return archiveFailed('busy', REPORTS_ARCHIVE_BUSY);
-          case 'stopped':
-            return stopped;
-          case 'published':
-            console.log(`\n  ✓ Pushed ${archived.saved} session(s) to team repo`);
-            break;
-          case 'already-present':
-            console.log(`\n  · No changes to push\n`);
-            break;
-          case 'failed':
-            console.error(`\n  ✗ ${archived.saved} session(s) not pushed to teamai-reports: ${safeText(archived.reason)}`);
-            process.exitCode = 1;
-            if (json) return archiveFailed('archive_failed', `the push to teamai-reports failed: ${safeText(archived.reason)}`);
-            break;
-          default: {
-            const unhandled: never = archived;
-            return unhandled;
-          }
-        }
-      } else {
-        const syncMgr = new SyncManager(repoRoot);
-        const saved = await archiveInto(syncMgr, repoRoot);
-        if (saved === undefined) return stopped;
-        // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
-        // Under --json a throw reaches the action's catch, which prints the envelope; runGitStep would exit without one.
-        const commitArchive = () => syncMgr.gitCommit(commitMessage(saved));
-        const commit = json ? commitArchive() : runGitStep(commitArchive, repoRoot, 'git commit');
-        if (commit.status === 'committed') {
-          const pushed = await pushToRemote(syncMgr, repoRoot);
-          if (pushed) {
-            console.log(`\n  ✓ Pushed ${saved} session(s) to team repo`);
-          } else {
-            console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
-            process.exitCode = 1;
-            if (json) {
-              return archiveFailed(
-                'archive_failed',
-                `committed in ${repoRoot} as ${commit.commit.slice(0, 8)}, but the push to the remote failed (reason on stderr).`,
-              );
+      // Archive changes and their Git publication are serialized per team repo, the teamai-reports archive included.
+      const publication = await withSessionPublicationLock(repoRoot, async (): Promise<MigrationResult | undefined> => {
+        if (reports) {
+          const archived = await archiveToReports(reports, archiveInto, commitMessage);
+          switch (archived.status) {
+            case 'busy':
+              return archiveFailed('busy', REPORTS_ARCHIVE_BUSY);
+            case 'stopped':
+              return stopped;
+            case 'published':
+              console.log(`\n  ✓ Pushed ${archived.saved} session(s) to team repo`);
+              break;
+            case 'already-present':
+              console.log(`\n  · No changes to push\n`);
+              break;
+            case 'failed':
+              console.error(`\n  ✗ ${archived.saved} session(s) not pushed to teamai-reports: ${safeText(archived.reason)}`);
+              process.exitCode = 1;
+              if (json) return archiveFailed('archive_failed', `the push to teamai-reports failed: ${safeText(archived.reason)}`);
+              break;
+            default: {
+              const unhandled: never = archived;
+              return unhandled;
             }
           }
-          console.log(`  commit: ${commit.commit.slice(0, 8)}`);
-        } else if (commit.status === 'failed') {
-          // Hooks / gpg / missing identity: the archive files are still
-          // staged. Say so, and fail -- "No changes to push" here would hide
-          // a broken archive.
-          console.error(`\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`);
-          process.exitCode = 1;
-          if (json) return archiveFailed('archive_failed', `the commit failed, files left staged in ${repoRoot}: ${safeText(commit.reason)}`);
         } else {
-          console.log(`\n  · No changes to push\n`);
+          const syncMgr = new SyncManager(repoRoot);
+          const saved = await archiveInto(syncMgr, repoRoot);
+          if (saved === undefined) return stopped;
+          // [fixed] a gitCommit failure (not a git directory / index.lock race) used to crash with a raw stack trace
+          // Under --json a throw reaches the action's catch, which prints the envelope; runGitStep would exit without one.
+          const commitArchive = () => syncMgr.gitCommit(commitMessage(saved));
+          const commit = json ? commitArchive() : runGitStep(commitArchive, repoRoot, 'git commit');
+          if (commit.status === 'committed') {
+            const pushed = await pushToRemote(syncMgr, repoRoot);
+            if (pushed) {
+              console.log(`\n  ✓ Pushed ${saved} session(s) to team repo`);
+            } else {
+              console.log(`\n  · ${saved} session(s) committed locally but not pushed`);
+              process.exitCode = 1;
+              if (json) {
+                return archiveFailed(
+                  'archive_failed',
+                  `committed in ${repoRoot} as ${commit.commit.slice(0, 8)}, but the push to the remote failed (reason on stderr).`,
+                );
+              }
+            }
+            console.log(`  commit: ${commit.commit.slice(0, 8)}`);
+          } else if (commit.status === 'failed') {
+            // Hooks / gpg / missing identity: the archive files are still
+            // staged. Say so, and fail -- "No changes to push" here would hide
+            // a broken archive.
+            console.error(`\n  ✗ Commit failed, ${saved} session(s) left staged in ${repoRoot}: ${safeText(commit.reason)}`);
+            process.exitCode = 1;
+            if (json) return archiveFailed('archive_failed', `the commit failed, files left staged in ${repoRoot}: ${safeText(commit.reason)}`);
+          } else {
+            console.log(`\n  · No changes to push\n`);
+          }
         }
-      }
+      });
+      if (publication.status === 'busy') return archiveFailed('busy', archiveBusyMessage(repoRoot, publication.lockPath));
+      if (publication.value) return publication.value;
     }
 
     return { summary: { copied, dryRun: isDryRun(), total: targets.length, migrated, reused, failed } };

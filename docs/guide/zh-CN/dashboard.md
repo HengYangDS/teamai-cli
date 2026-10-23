@@ -78,3 +78,5 @@ teamai session resume <name> --platform claude-code
 session 命令使用本项目安装的团队仓库克隆，没有时使用用户级安装的克隆，所以只有要指向另一个克隆时才需要 `--repo-root`。没有任何安装时，它们输出 `teamai is not set up for this directory.`，提示 `teamai init` 和 `--repo-root`，并以退出码 1 退出。
 
 业务仓库自己当团队仓库时，归档在 `teamai-reports` 分支上。另一个 teamai 命令正在写这个分支时，`session push`、`session migrate --push` 和 `session pull` 输出 `Error: Another teamai command is writing teamai-reports`，以退出码 1 退出，不改动该分支。`migrate --push` 会保留它生成的副本。等另一个命令结束后再执行一次。
+
+同一台机器上的 `session push`、`migrate --push` 和 `session pull` 会串行执行归档修改与 Git 发布。后来的命令最多等待十秒，仍被占用时会报告锁路径并提示重试。归档写入失败后，会先删除新文件或恢复原有 transcript 与 metadata，再返回错误；重试沿用会话名。若回滚本身失败，错误会指出保留的备份路径，便于恢复。

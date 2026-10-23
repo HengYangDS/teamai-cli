@@ -1,3 +1,4 @@
+import { hookToolPathsForConfig } from './types.js';
 import path from 'node:path';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import matter from 'gray-matter';
@@ -95,7 +96,18 @@ import {
 // A timed-out report still owns its success bookkeeping. Do not start another
 // batch in this process until it settles and finishes consuming its events.
 let pendingUsageReport: Promise<void> | undefined;
+// That report together with the release of the sync locks it holds.
+let lateUsageReport: Promise<void> | undefined;
 const FILE_NOT_FOUND_ERROR_CODE = 'ENOENT';
+
+/**
+ * Resolves once a usage report that pull() stopped waiting for has finished
+ * and released its sync locks. A process that exits right after pull(), such
+ * as the hook dispatcher, awaits this first, or its exit cuts the push (#1322).
+ */
+export async function settleLateUsageReport(): Promise<void> {
+  await lateUsageReport;
+}
 
 /**
  * When the team clone was last fetched, beside the clone (as a source cache's
@@ -2842,7 +2854,7 @@ async function reinjectLegacyHooks(localConfig: LocalConfig): Promise<void> {
   // The old-format check reads HOME; for a non-self project scope resolveBaseDir
   // → <projectRoot>, so reinjecting there never clears HOME's legacy format and
   // this migration would re-fire on every pull (#370).
-  const { baseDir, scope: hookScope } = resolveHookScope(localConfig);
+  const { baseDir } = resolveHookScope(localConfig);
   const disabled = localConfig.disabledAgents;
   let hookFilter = localConfig.enabledAgents;
   if (disabled && disabled.length > 0) {
@@ -2851,7 +2863,7 @@ async function reinjectLegacyHooks(localConfig: LocalConfig): Promise<void> {
   }
   // Paths follow the same scope decision as `baseDir`: a non-self project scope
   // injects into HOME, so it must use the user-scope paths there.
-  await injectHooksToAllTools(scopedToolPaths(teamConfig, { ...localConfig, scope: hookScope }), baseDir, hookFilter, localConfig.toolRoots);
+  await injectHooksToAllTools(hookToolPathsForConfig(teamConfig, localConfig), baseDir, hookFilter, localConfig.toolRoots);
   log.debug('Hooks migrated to dispatch format');
 }
 
@@ -3380,7 +3392,7 @@ export async function pull(
     // Keep its partition locks until completion so another CLI cannot re-report
     // the same data while this pull is no longer waiting.
     if (usageReport && usageReport === pendingUsageReport) {
-      void usageReport.then(releaseSyncLocks, releaseSyncLocks).catch((e) => {
+      lateUsageReport = usageReport.then(releaseSyncLocks, releaseSyncLocks).catch((e) => {
         log.error(`Could not release report sync locks: ${(e as Error).message}`);
       });
     } else {

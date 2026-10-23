@@ -888,12 +888,11 @@ function zcodeEntryCarriesItsReply(entry: { command: string; args: string[] }): 
 async function buildProjectRulesHookChecks(ctx: DoctorContext): Promise<Check[]> {
   const { localConfig, teamConfig } = ctx;
   if (!teamConfig || localConfig.scope !== 'project') return [];
-  const paths = scopedToolPaths(teamConfig, localConfig);
   const home = getUserHome();
   const inject = 'Run `teamai hooks inject` to rewrite it.';
   const checks: Check[] = [];
 
-  const zcodeSettings = paths.zcode?.settings;
+  const zcodeSettings = scopedToolPaths(teamConfig, { ...localConfig, scope: 'user' }).zcode?.settings;
   if (zcodeSettings && !isAgentExcluded(localConfig, 'zcode') && await pathExists(path.join(home, '.zcode'))) {
     const file = path.join(home, zcodeSettings);
     const read = await readJsonObject(file);
@@ -2218,6 +2217,23 @@ export async function buildInstructionDeliveryChecks(ctx: DoctorContext): Promis
   const { targets, hooks, stale, opencodeFallback } = await resolveInstructionTargets(teamConfig, localConfig);
   const pullNow = 'Run `teamai pull`.';
   const checks: Check[] = [];
+
+  const openclawTarget = targets.find((target) => target.tools.includes('openclaw'));
+  if (openclawTarget && await holdsInstructionBlocks(openclawTarget.path)) {
+    const { openclawBootstrapBudget } = await import('./openclaw-home.js');
+    const budget = await openclawBootstrapBudget();
+    const length = (await readFileSafe(openclawTarget.path) ?? '').trimEnd().length;
+    checks.push({
+      name: 'OpenClaw AGENTS.md fits the default bootstrap read budget',
+      source: 'local',
+      check: async () => !budget.error && length <= budget.limit,
+      fix: budget.error
+        ? `${budget.config} could not be parsed, so the OpenClaw bootstrap budget is unknown: ${budget.error}. Fix the config and run teamai doctor again.`
+        : `${openclawTarget.path} has ${length} characters including member text and all TeamAI blocks, over the `
+          + `${budget.limit}-character bootstrap budget. OpenClaw truncates or skips it under these default-agent limits. Shorten the complete file or review `
+          + `agents.defaults.bootstrapMaxChars and agents.defaults.bootstrapTotalMaxChars in ${budget.config}. Teamai does not truncate your instructions.`,
+    });
+  }
 
   for (const target of targets) {
     const plan = await planInstructionFiles([target], blocks);
