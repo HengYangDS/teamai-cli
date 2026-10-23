@@ -104,6 +104,31 @@ describe('redact', () => {
       const expected = dsn.replace(pw, '<REDACTED:conn>');
       expect(redact(dsn)).toBe(expected);
     });
+
+    const pw = ['hun', 'ter2', 'pass'].join('');
+    const dsn = ['postgres://user', pw].join(':') + '@' + 'db.example.com';
+
+    it('masks a connection string whose scheme follows digits or punctuation', () => {
+      for (const lead of ['', ' ', '1', '+', '9.x-']) {
+        const text = `${lead}${dsn}`;
+        expect(redact(text)).toBe(text.replace(pw, '<REDACTED:conn>'));
+      }
+    });
+
+    it.each([
+      ['a letter run', 'x'.repeat(100_000)],
+      ['an alphanumeric run', 'a1'.repeat(50_000)],
+    ])('stays fast on %s and still masks a connection string after it', (_shape, token) => {
+      const text = `${token} ${dsn}`;
+
+      const start = performance.now();
+      const out = redact(text);
+      const elapsed = performance.now() - start;
+
+      expect(out).toBe(text.replace(pw, '<REDACTED:conn>'));
+      // Linear work here is a few milliseconds; a per-offset rescan of the token takes seconds.
+      expect(elapsed).toBeLessThan(500);
+    }, 30_000);
   });
 
   it('can disable the pattern layer', () => {

@@ -72,7 +72,8 @@ const KV_PATTERN =
 const BEARER_PATTERN = /\b(bearer\s+)([A-Za-z0-9._-]{16,})/gi;
 
 /** `proto://user:PASSWORD@host` — mask only the password segment. */
-const CONNECTION_STRING_PATTERN = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]{6,})(@)/g;
+const CONNECTION_STRING_PATTERN =
+  /(?<![a-zA-Z0-9+.-])([0-9+.-]*[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]{6,})(@)/g;
 
 export interface RedactOptions {
   /**
