@@ -207,7 +207,7 @@ describe('#1083 workflow run records', () => {
     const answers = ['invalid_json', 'driver_running', 'invalid_run', 'repeated_response', 'agent_in_path', 'stale_response', 'retried', 'end_reached', 'repeated_report', 'wrong_attempt', 'invalid_report', 'lease_cancelled', 'interrupted', 'run_unreadable', 'driver_stuck', 'busy', 'workflow_recursion', 'workflow_not_found',
       // Refusals of a run handover, answered to the command or driver that asked for it.
       'not_owner', 'unsupported_repo', 'reports_unreachable', 'reports_failed', 'run_not_found', 'run_not_published', 'run_mismatch',
-      'state_conflict', 'state_moved', 'definition_mismatch', 'records_pending', 'snapshot_unsupported', 'secret_detected', 'origin_unavailable', 'commit_missing',
+      'state_conflict', 'state_moved', 'definition_mismatch', 'records_pending', 'snapshot_unsupported', 'secret_detected', 'local_path_detected', 'origin_unavailable', 'commit_missing',
       'branch_diverged', 'sessions_not_archived'];
     const source = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'workflow');
     const written = new Set(fs.readdirSync(source).filter((file) => file.endsWith('.ts'))

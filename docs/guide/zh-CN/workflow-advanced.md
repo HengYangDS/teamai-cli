@@ -680,7 +680,7 @@ teamai workflow resume <run> [--claim]
 
 在该运行的业务仓库的检出目录中执行 `resume`。认领仍在运行的运行时，会用 `git ls-remote` 检查该运行的分支在这个检出目录的 `origin` 上，并且停在运行记录的提交上。它从不 fetch 到这个检出目录。已结束的运行不需要它的任何分支，所以即使合并后分支已被删除，认领也会成功，`resume` 会报告它的结束结果。如果重试重新打开了它，下一次 `resume` 会 fetch 它需要的分支。本机的工作流缓存与运行所用的工作流不同时，认领会在运行的团队提交上读取它们（团队仓库没有该提交时先 fetch），并在 stderr 输出 `[team commit <commit>] Synced N workflows`。你的缓存和团队仓库检出目录保持不变。
 
-发布的状态是 `teamai-reports` 上的 `workflows/runs/<run>/state.json`。它包含运行继续所需的内容：状态、输入、每个步骤的结果、输出、pass 和带备注的 HITL 回答、基准、每个工作区的提交，以及步骤继续过的每个会话副本的工具和 id。工作流本身只以 `sourceHash`、`definitionHash` 和 `teamRevision` 传递。它不包含步骤和 pass 的 `message`、每个租约和回答的驱动身份（租约保留驱动类型）、工作区所有者，以及业务检出目录的路径。每条失败消息都换成 `The details stay on the machine that ran this step.`，失败的 `code` 保留。提交只以完整 id（40 或 64 位十六进制）出现。`publish` 用 TeamAI 的密钥规则和本进程环境变量里的密钥检查每个值和键，遇到第一个匹配就以 `secret_detected` 拒绝。拒绝信息写明步骤、字段和密钥类型，从不包含值本身。这样的运行不能交接，请在本机继续。
+发布的状态是 `teamai-reports` 上的 `workflows/runs/<run>/state.json`。它包含运行继续所需的内容：状态、输入、每个步骤的结果、输出、pass 和带备注的 HITL 回答、基准、每个工作区的提交，以及步骤继续过的每个会话副本的工具和 id。工作流本身只以 `sourceHash`、`definitionHash` 和 `teamRevision` 传递。它不包含步骤和 pass 的 `message`、每个租约和回答的驱动身份（租约保留驱动类型）、工作区所有者，以及业务检出目录的路径。每条失败消息都换成 `The details stay on the machine that ran this step.`，失败的 `code` 保留。提交只以完整 id（40 或 64 位十六进制）出现。`publish` 用 TeamAI 的密钥规则和本进程环境变量里的密钥检查每个值和键，遇到第一个匹配就以 `secret_detected` 拒绝。拒绝信息写明步骤、字段和密钥类型，从不包含值本身。本机的绝对路径同样以 `local_path_detected` 拒绝：Windows 盘符或共享路径、`~/` 路径、`file://` URL，以及第一级目录存在于本机根目录下的 `/` 路径，例如 `/Users/alice/data.csv`。URL、`src/main.ts` 这样的相对路径和 `/api/v1` 这样的路由可以发布。这样的运行不能交接，请在本机继续，或改用相对于仓库的路径重新启动它。
 
 `--sessions` 还会把未结算步骤将要继续的每个 agent 会话的最新副本（`session: continue` 或 `session.from`）放进团队会话归档，并像 `teamai session push --scrub` 一样脱敏。这包括循环即将再次运行的步骤，以及尚未开始的工作流步骤里的步骤。已结算步骤的会话和更早 pass 的会话从不包括在内。信封随后在 `sessions` 中以 `{"tool","id"}` 列出它们，没有时为空列表。本机读不到的会话不归档：其所在的链归档本机能读的最新会话，`skipped` 列出被跳过的较新会话。整条链都读不到时，发布被拒绝。会话在写入状态之前归档，所以之后被拒绝的发布仍会留下已归档的会话，没有变化的发布也照样归档。在接着运行的机器上，本地驱动按以下顺序恢复步骤的会话：
 
@@ -713,6 +713,7 @@ teamai workflow resume <run> [--claim]
 | `definition_mismatch` | 认领拿不到运行所用的工作流。可能带 `teamRevision`。 | 按消息操作：等另一台机器推送工作流后执行 `teamai pull`，fetch 该团队提交，或两台机器使用相同的 teamai 版本。 |
 | `snapshot_unsupported` | 状态中有一个字段（`field` 给出）快照格式无法承载，或当前 teamai 无法读取。 | 认领时，更新 teamai 后重试。发布时，修复写入该值的驱动，例如不是完整 id 的提交。 |
 | `secret_detected` | 某个值看起来像密钥。带 `step`（位于步骤中时）、`field` 和 `label`。 | 在本机继续该运行。 |
+| `local_path_detected` | 某个值包含本机的绝对路径。带 `step`（位于步骤中时）和 `field`。 | 在本机继续该运行，或改用相对于仓库的路径重新启动它。 |
 | `sessions_not_archived` | 本机读不到某条链的所有会话（或其工具不是 teamai 能读取的）、归档被占用，或提交或推送失败。 | 再发布一次，或不加 `--sessions` 发布，让这些步骤开新会话。 |
 | `origin_unavailable` | 无法读取或更新业务仓库的 origin。 | 在该运行的业务检出目录中执行命令，并确保能访问它的 origin。 |
 | `commit_missing` | 记录的分支不在 origin 上，发布时落后于记录的提交，或本检出目录缺少基准提交，无法固定基准。带 `branch` 和 `commit`。 | 在有该提交的机器上推送分支。发布时，消息会给出要执行的 `git -C <checkout> push origin <commit>:refs/heads/<branch>`。或在运行开始时所在的检出目录中发布。 |

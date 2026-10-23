@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { collectEnvSecrets, redact } from '../utils/redact.js';
 import { isRecord } from './expression.js';
@@ -76,7 +78,8 @@ export type RunSnapshot = z.infer<typeof SnapshotSchema>;
 
 export type SnapshotError =
   | { code: 'snapshot_unsupported'; field: string; message: string }
-  | { code: 'secret_detected'; step?: string; field: string; label: string; message: string };
+  | { code: 'secret_detected'; step?: string; field: string; label: string; message: string }
+  | { code: 'local_path_detected'; step?: string; field: string; message: string };
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: SnapshotError };
 
@@ -275,12 +278,13 @@ function handed<T extends object, R extends FieldRules<T>>(value: T, rules: R, r
 
 /**
  * The snapshot body of `run`, or why it cannot leave this machine. Every string and key it would publish is checked
- * against the secret patterns and the secret-looking values of `env`, and a hit names where, never the value.
+ * against the secret patterns, the secret-looking values of `env`, and the shapes of an absolute path of this machine,
+ * and a hit names where, never the value.
  */
 export function projectRun(run: RunState, env: NodeJS.ProcessEnv): Parsed<SnapshotBody> {
   const projected = handed(run, RUN_RULES, RUN_REWRITES);
-  const secret = firstSecret(run.id, projected, env);
-  if (secret) return { ok: false, error: secret };
+  const unfit = firstUnpublishable(run.id, projected, env);
+  if (unfit) return { ok: false, error: unfit };
   const parsed = BodySchema.safeParse(projected);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -297,27 +301,61 @@ export function projectRun(run: RunState, env: NodeJS.ProcessEnv): Parsed<Snapsh
 
 const PLACEHOLDER = /<REDACTED:([^>]+)>/;
 
-function firstSecret(runId: string, body: Record<string, unknown>, env: NodeJS.ProcessEnv): SnapshotError | undefined {
+/** A path from the root of a drive or share, from a home directory, or as a file URL: none means anything on another machine. */
+const ROOTED_PATH = /(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\[^\\\s]+\\)|(?<![\w.~\-/\\])~[\\/]|\bfile:\/\//i;
+
+/** A `/` that starts a path rather than continuing a word, a URL, or another path, with the path's first directory. */
+const SLASH_PATH = /(?<![\w.~\-/\\])\/(?!\/)([^/\s"'`)<>\]}|,;]+)/g;
+
+/**
+ * Whether `text` holds an absolute path of this machine. A `/` path counts when its first directory exists at this
+ * machine's root, as `/Users` or `/home` does, so a route such as `/api/v1` does not.
+ */
+function holdsLocalPath(text: string): boolean {
+  return ROOTED_PATH.test(text) || [...text.matchAll(SLASH_PATH)].some(([, first]) => first !== undefined && fs.existsSync(path.join('/', first)));
+}
+
+type Unfit = { kind: 'secret'; label: string } | { kind: 'path' };
+
+function firstUnpublishable(runId: string, body: Record<string, unknown>, env: NodeJS.ProcessEnv): SnapshotError | undefined {
   const envSecrets = collectEnvSecrets(env);
   const labelOf = (text: string): string | undefined => {
     const redacted = redact(text, { envSecrets });
     return redacted === text ? undefined : PLACEHOLDER.exec(redacted)?.[1] ?? 'secret';
   };
-  const found = (step: string | undefined, at: ReadonlyArray<string | number>, label: string): SnapshotError => {
+  const unfitOf = (text: string): Unfit | undefined => {
+    const label = labelOf(text);
+    if (label !== undefined) return { kind: 'secret', label };
+    return holdsLocalPath(text) ? { kind: 'path' } : undefined;
+  };
+  const found = (step: string | undefined, at: ReadonlyArray<string | number>, unfit: Unfit): SnapshotError => {
     const field = fieldPath(at);
     const where = step === undefined ? `field "${field}"` : `step "${step}" field "${field}"`;
-    return {
-      code: 'secret_detected',
-      ...(step === undefined ? {} : { step }),
-      field,
-      label,
-      message: `Run ${runId} was not published: ${where} holds what looks like a secret (${label}). Publishing would copy it to teamai-reports; the run stays on this machine.`,
-    };
+    const named = { ...(step === undefined ? {} : { step }), field };
+    switch (unfit.kind) {
+      case 'secret':
+        return {
+          code: 'secret_detected',
+          ...named,
+          label: unfit.label,
+          message: `Run ${runId} was not published: ${where} holds what looks like a secret (${unfit.label}). Publishing would copy it to teamai-reports; the run stays on this machine.`,
+        };
+      case 'path':
+        return {
+          code: 'local_path_detected',
+          ...named,
+          message: `Run ${runId} was not published: ${where} holds an absolute path of this machine, which another machine cannot use, so the run stays here. Continue it on this machine, or start it again with paths relative to the repository.`,
+        };
+      default: {
+        const unhandled: never = unfit;
+        return unhandled;
+      }
+    }
   };
   const search = (value: unknown, step: string | undefined, at: Array<string | number>): SnapshotError | undefined => {
     if (typeof value === 'string') {
-      const label = labelOf(value);
-      return label === undefined ? undefined : found(step, at, label);
+      const unfit = unfitOf(value);
+      return unfit === undefined ? undefined : found(step, at, unfit);
     }
     if (Array.isArray(value)) {
       for (const [index, item] of value.entries()) {
@@ -328,8 +366,8 @@ function firstSecret(runId: string, body: Record<string, unknown>, env: NodeJS.P
     }
     if (!isRecord(value)) return undefined;
     for (const [key, item] of Object.entries(value)) {
-      const label = labelOf(key);
-      if (label !== undefined) return found(step, at, label);
+      const unfit = unfitOf(key);
+      if (unfit !== undefined) return found(step, at, unfit);
       const hit = search(item, step, [...at, key]);
       if (hit) return hit;
     }

@@ -687,6 +687,44 @@ describe('workflow handoff through teamai-reports', () => {
     expect(originFile(acme.origin, `workflows/runs/${runId}/state.json`)).toBeNull();
   });
 
+  const HOME_FILE = path.join(os.homedir(), 'private', 'customer-data.csv');
+  it.each<[string, (run: RunState) => RunState, { step?: string; field: string }]>([
+    ['the run inputs', (run) => ({ ...run, inputs: { file: HOME_FILE } }), { field: 'inputs.file' }],
+    ['text in the outputs of a step', (run) => ({ ...run, steps: [{ id: 'one', ...settled, outputs: { summary: `Wrote ${HOME_FILE}.` } }] }), { step: 'one', field: 'outputs.summary' }],
+    ['the note of an answer', (run) => ({ ...run, steps: [{ id: 'one', status: 'pending', answer: { choice: 'yes', note: `see ~/notes.md`, at: run.createdAt, channel: 'cli', agent: false } }] }), { step: 'one', field: 'answer.note' }],
+    ['a key of the outputs of a step', (run) => ({ ...run, steps: [{ id: 'one', ...settled, outputs: { files: { [HOME_FILE]: 'ok' } } }] }), { step: 'one', field: 'outputs.files' }],
+    ['a Windows drive path', (run) => ({ ...run, inputs: { file: 'C:\\Users\\alice\\data.csv' } }), { field: 'inputs.file' }],
+    ['a Windows share path', (run) => ({ ...run, inputs: { file: '\\\\fileserver\\share\\data.csv' } }), { field: 'inputs.file' }],
+    ['a file URL', (run) => ({ ...run, inputs: { file: 'file:///srv/data.csv' } }), { field: 'inputs.file' }],
+  ])('refuses to publish an absolute path of this machine in %s, naming the field', async (_name, edit, where) => {
+    const acme = team();
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    await editRun(alice.config, runId, edit);
+
+    const refused = await publishRun(alice.config, runId, { env: {}, checkout: alice.checkout });
+    expect(refused).toMatchObject({
+      ok: false,
+      error: { code: 'local_path_detected', ...where, message: expect.stringContaining('Continue it on this machine') },
+    });
+    if (!where.step) expect(refused.ok ? undefined : refused.error).not.toHaveProperty('step');
+    expect(originFile(acme.origin, `workflows/runs/${runId}/state.json`)).toBeNull();
+  });
+
+  it('publishes URLs, paths relative to the repository, and text with slashes', async () => {
+    const acme = team();
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    const inputs = {
+      url: 'https://example.com/Users/alice/report', file: 'src/app/main.ts', dir: './docs', route: '/api/v1/users',
+      text: 'read and/or write 3/4 of the I/O', branch: 'origin/main',
+    };
+    await editRun(alice.config, runId, (run) => ({ ...run, inputs }));
+
+    expect(await publishRun(alice.config, runId, { env: {}, checkout: alice.checkout })).toMatchObject({ ok: true });
+    expect(JSON.parse(originFile(acme.origin, `workflows/runs/${runId}/state.json`) ?? '{}')).toMatchObject({ inputs });
+  });
+
   it('refuses to publish while the run has records teamai-reports did not take, saying why', async () => {
     const acme = team();
     const alice = await acme.member('alice');
