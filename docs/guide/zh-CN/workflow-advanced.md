@@ -659,7 +659,7 @@ teamai workflow resume <run> [--claim]
 
 [在另一台机器上继续运行](workflow.md#在另一台机器上继续运行)介绍常见用法。本节说明具体规则。
 
-第一次 `publish` 让本安装实例成为该运行的所有者。所有者是一个安装实例 id（保存在 TeamAI 数据目录下的 `workflows/owner.json`）加上操作系统用户名。同一台机器上的两个安装实例显示相同的用户名，用 id 区分它们。`publish` 输出一个信封：
+第一次 `publish` 让本安装实例成为该运行的所有者。所有者是一个安装实例 id（保存在 TeamAI 数据目录下的 `workflows/owner.json`）加上成员的 TeamAI 用户名，与运行记录中的相同。同一成员的两个安装实例显示相同的用户名，用 id 区分它们。`publish` 输出一个信封：
 
 ```json
 {"data":{"run":"<run>","publication":"published","stateRevision":1,"inFlight":[{"step":"fix","attempt":"<attempt>","driverKind":"local"}]}}

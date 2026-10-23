@@ -659,7 +659,7 @@ teamai workflow resume <run> [--claim]
 
 [Continue a run on another machine](workflow.md#continue-a-run-on-another-machine) shows the common case. This section covers the rules.
 
-The first `publish` makes this install the run's owner. The owner is an install id, kept in `workflows/owner.json` under the TeamAI data directory, plus the OS user name. Two installs on one machine show the same user name, and the id tells them apart. `publish` prints one envelope:
+The first `publish` makes this install the run's owner. The owner is an install id, kept in `workflows/owner.json` under the TeamAI data directory, plus the member's TeamAI username, the one the run records carry. Two installs of one member show the same user name, and the id tells them apart. `publish` prints one envelope:
 
 ```json
 {"data":{"run":"<run>","publication":"published","stateRevision":1,"inFlight":[{"step":"fix","attempt":"<attempt>","driverKind":"local"}]}}

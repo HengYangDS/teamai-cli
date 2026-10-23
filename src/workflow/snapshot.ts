@@ -14,7 +14,7 @@ import type { RunState, StepLease, WorkflowDefinition, WorkflowFailure } from '.
  * the steps did and what expressions read, never this machine's driver identities, paths, or the workflow definitions.
  */
 
-/** The install that owns a published run: a random id kept under its data home, and its OS user name for messages. */
+/** The install that owns a published run: a random id kept under its data home, and the member's team username for messages. */
 const OwnerSchema = z.object({ id: z.string().min(1), user: z.string() });
 export type HandoffOwner = z.infer<typeof OwnerSchema>;
 

@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { readFileSafe, writeFileAtomic, writeJsonAtomic } from '../utils/fs.js';
@@ -147,7 +146,7 @@ export async function installOwner(config: LocalConfig): Promise<HandoffOwner> {
     id = ownerId(await readFileSafe(file));
   }
   if (id === undefined) throw new Error(`${file} does not hold an install id. Move it aside and try again.`);
-  return { id, user: osUser() };
+  return { id, user: config.username };
 }
 
 function ownerId(text: string | null): string | undefined {
@@ -157,13 +156,5 @@ function ownerId(text: string | null): string | undefined {
     return typeof value === 'object' && value !== null && 'id' in value && typeof value.id === 'string' && value.id !== '' ? value.id : undefined;
   } catch {
     return undefined;
-  }
-}
-
-function osUser(): string {
-  try {
-    return os.userInfo().username;
-  } catch {
-    return 'unknown';
   }
 }

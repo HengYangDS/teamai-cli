@@ -340,6 +340,23 @@ describe('workflow handoff through teamai-reports', () => {
     });
   });
 
+  it('names the owner by the team username, as the run records do', async () => {
+    const acme = team();
+    const alice = await acme.member('alice');
+    const bob = await acme.member('bob');
+    const runId = await start(alice);
+    const ownerOnOrigin = (): unknown => JSON.parse(originFile(acme.origin, `workflows/runs/${runId}/state.json`) ?? '{}').owner;
+
+    expect(await publishRun(alice.config, runId, { env: {}, checkout: alice.checkout })).toMatchObject({ ok: true });
+    expect(ownerOnOrigin()).toMatchObject({ user: 'alice' });
+    expect(await claimRun(bob.config, runId, { checkout: bob.checkout })).toMatchObject({ ok: true, value: { owner: { user: 'bob' } } });
+    expect(ownerOnOrigin()).toMatchObject({ user: 'bob' });
+    expect(await publishRun(alice.config, runId, { env: {}, checkout: alice.checkout })).toMatchObject({
+      ok: false,
+      error: { code: 'not_owner', message: expect.stringContaining(`Run ${runId} is owned by bob (install `) },
+    });
+  });
+
   it('publishes an unchanged run without a new reports commit or state revision', async () => {
     const acme = team();
     const alice = await acme.member('alice');
