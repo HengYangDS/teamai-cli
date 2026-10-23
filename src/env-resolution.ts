@@ -21,6 +21,7 @@ import {
 } from './secret-store.js';
 import { getDataHome, getEnvBackupPath, type LocalConfig } from './types.js';
 import { readFileSafe } from './utils/fs.js';
+import { MIN_ENV_VALUE_LENGTH } from './utils/redact.js';
 import { isReservedTeamEnvKey } from './env-reserved.js';
 
 export interface SecretValue {
@@ -323,6 +324,19 @@ function variableValues(
       : { source: 'env.yaml', value: variable.entry.value, fromEnv });
   }
   return { kind: 'resolved', values };
+}
+
+/**
+ * The value of each secret the team declares in `env/secrets.yaml`, as this
+ * member resolves it, keyed by name, for redaction. A declared name need not
+ * look secret, so `collectEnvSecrets` misses these. Empty when the values
+ * can't be read.
+ */
+export async function collectTeamSecrets(localConfig: LocalConfig, env: NodeJS.ProcessEnv = process.env): Promise<Record<string, string>> {
+  if (!resolvesTeamEnv(localConfig)) return {};
+  const { secrets } = await resolveTeamEnv(localConfig, undefined, env);
+  if (secrets.kind !== 'resolved') return {};
+  return Object.fromEntries([...secrets.values].flatMap(([key, { value }]) => (value.length < MIN_ENV_VALUE_LENGTH ? [] : [[key, value]])));
 }
 
 export function secretState(secrets: StoreResolution<SecretValue>, key: string): SecretState {

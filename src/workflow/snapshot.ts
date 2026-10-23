@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { collectEnvSecrets, redact } from '../utils/redact.js';
+import { redact } from '../utils/redact.js';
 import { isRecord } from './expression.js';
 import {
   ArchivedPassSchema, SessionContinuationSchema, StepCheckpointSchema, type ArchivedPass, type HitlAnswer, type StepPass, type StepState,
@@ -278,12 +278,12 @@ function handed<T extends object, R extends FieldRules<T>>(value: T, rules: R, r
 
 /**
  * The snapshot body of `run`, or why it cannot leave this machine. Every string and key it would publish is checked
- * against the secret patterns, the secret-looking values of `env`, and the shapes of an absolute path of this machine,
- * and a hit names where, never the value.
+ * against the secret patterns, the values of `secrets` keyed by their names, and the shapes of an absolute path of this
+ * machine, and a hit names where, never the value.
  */
-export function projectRun(run: RunState, env: NodeJS.ProcessEnv): Parsed<SnapshotBody> {
+export function projectRun(run: RunState, secrets: Record<string, string>): Parsed<SnapshotBody> {
   const projected = handed(run, RUN_RULES, RUN_REWRITES);
-  const unfit = firstUnpublishable(run.id, projected, env);
+  const unfit = firstUnpublishable(run.id, projected, secrets);
   if (unfit) return { ok: false, error: unfit };
   const parsed = BodySchema.safeParse(projected);
   if (!parsed.success) {
@@ -317,8 +317,7 @@ function holdsLocalPath(text: string): boolean {
 
 type Unfit = { kind: 'secret'; label: string } | { kind: 'path' };
 
-function firstUnpublishable(runId: string, body: Record<string, unknown>, env: NodeJS.ProcessEnv): SnapshotError | undefined {
-  const envSecrets = collectEnvSecrets(env);
+function firstUnpublishable(runId: string, body: Record<string, unknown>, envSecrets: Record<string, string>): SnapshotError | undefined {
   const labelOf = (text: string): string | undefined => {
     const redacted = redact(text, { envSecrets });
     return redacted === text ? undefined : PLACEHOLDER.exec(redacted)?.[1] ?? 'secret';

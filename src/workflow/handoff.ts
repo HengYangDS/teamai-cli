@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { collectTeamSecrets } from '../env-resolution.js';
 import { AgentSession } from '../session-flow/agent-session.js';
 import { archiveSessions, type ArchiveSessionRef } from '../session-flow/archive.js';
 import { usesBranchWorktree, type LocalConfig } from '../types.js';
-import { sanitizeGitUrl } from '../utils/redact.js';
+import { collectEnvSecrets, sanitizeGitUrl } from '../utils/redact.js';
 import { fetchReportsOriginFile, updateReports, type ReportsChange } from '../utils/reports-branch.js';
 import { loadWorkflowBundle, loadWorkflowBundleAt, type WorkflowBundle } from './cache.js';
 import { pendingRecords, publishPendingRecords, type RecordDelivery } from './records.js';
@@ -199,7 +200,8 @@ export async function publishRun(
   const stored = await readRun(config, runId);
   if (stored === 'missing') return refused({ code: 'run_not_found', message: `Run ${runId} was not found` });
   if (stored === 'corrupt') return refused(runUnreadable(runId));
-  const projected = projectRun(stored, env);
+  const secrets = { ...collectEnvSecrets(env), ...await collectTeamSecrets(config, env) };
+  const projected = projectRun(stored, secrets);
   if (!projected.ok) return projected;
   const checked = checkedOutsideLocks(stored, options.sessions);
   const owner = await installOwner(config);
@@ -226,7 +228,7 @@ export async function publishRun(
 
   const result = await updateReports(config, async (worktree): Promise<ReportsChange<Result<PublishVerdict>>> => {
     const origin = await readOrigin(worktree, runId);
-    const verdict = origin.ok ? await decideLocked(config, runId, { origin: origin.value, checked, sessions: options.sessions, owner, env }) : origin;
+    const verdict = origin.ok ? await decideLocked(config, runId, { origin: origin.value, checked, sessions: options.sessions, owner, secrets }) : origin;
     if (!verdict.ok) return { value: verdict, write: null };
     const write = verdict.value.kind === 'write' ? await writeSnapshot(worktree, verdict.value.snapshot, `[teamai] Publish workflow run ${runId}`) : null;
     return { value: verdict, write };
@@ -436,15 +438,15 @@ interface PublishAgainst {
   checked: string;
   sessions?: (run: RunState) => LeaseSession[];
   owner: HandoffOwner;
-  env: NodeJS.ProcessEnv;
+  secrets: Record<string, string>;
 }
 
 /** Decides a publish against the snapshot origin holds, and records the write it makes before it is pushed. */
 async function decidePublish(
   local: RunState,
-  { origin, checked, sessions, owner, env }: PublishAgainst,
+  { origin, checked, sessions, owner, secrets }: PublishAgainst,
 ): Promise<{ value: Result<PublishVerdict>; write?: RunState }> {
-  const body = projectRun(local, env);
+  const body = projectRun(local, secrets);
   if (!body.ok) return { value: body };
   if (checkedOutsideLocks(local, sessions) !== checked) return { value: refused(publishMoved(local.id)) };
   const now = new Date().toISOString();

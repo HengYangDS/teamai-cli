@@ -704,6 +704,24 @@ describe('workflow handoff through teamai-reports', () => {
     expect(originFile(acme.origin, `workflows/runs/${runId}/state.json`)).toBeNull();
   });
 
+  it('refuses to publish the value of a secret the team declares, whatever its name, and publishes its plain variables', async () => {
+    const acme = team({ build: BUILD }, {
+      'env/secrets.yaml': 'secrets:\n  - key: WAREHOUSE_DSN\n',
+      'env/env.yaml': 'variables:\n  - key: DEPLOY_ENV\n    value: production-eu-west\n',
+    });
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    const env = { WAREHOUSE_DSN: 'mysql-prod-7Hq2xVb9Lk' };
+    await editRun(alice.config, runId, (run) => ({ ...run, steps: [{ id: 'one', ...settled, outputs: { dsn: 'mysql-prod-7Hq2xVb9Lk' } }] }));
+
+    const refused = await publishRun(alice.config, runId, { env, checkout: alice.checkout });
+    expect(refused).toMatchObject({ ok: false, error: { code: 'secret_detected', step: 'one', field: 'outputs.dsn', label: 'WAREHOUSE_DSN' } });
+    expect(JSON.stringify(refused)).not.toContain('mysql-prod-7Hq2xVb9Lk');
+
+    await editRun(alice.config, runId, (run) => ({ ...run, steps: [{ id: 'one', ...settled, outputs: { target: 'production-eu-west' } }] }));
+    expect(await publishRun(alice.config, runId, { env, checkout: alice.checkout })).toMatchObject({ ok: true });
+  });
+
   const HOME_FILE = path.join(os.homedir(), 'private', 'customer-data.csv');
   it.each<[string, (run: RunState) => RunState, { step?: string; field: string }]>([
     ['the run inputs', (run) => ({ ...run, inputs: { file: HOME_FILE } }), { field: 'inputs.file' }],

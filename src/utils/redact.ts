@@ -47,7 +47,7 @@ export function sanitizeGitUrl(text: string): string {
 const SECRET_NAME_PATTERN = /TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|(?:^|_)PAT(?:_|$)/;
 
 /** Minimum length before an env value is worth masking (avoids masking `KEY=1`). */
-const MIN_ENV_VALUE_LENGTH = 8;
+export const MIN_ENV_VALUE_LENGTH = 8;
 
 /**
  * (label, regex) pairs matched and replaced wholesale. Order matters: more
