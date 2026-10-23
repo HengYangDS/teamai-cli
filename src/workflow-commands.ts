@@ -4,7 +4,7 @@ import { leaseNext, parseNextPayload, parseReport, parseResponsePayload, reportA
 import { publishRun, resumeRun } from './workflow/handoff.js';
 import { cancelRun, respondToHitl, retryStep } from './workflow/run-controls.js';
 import { localDriver, runLocalDriver, withDriverLock } from './workflow/local-driver.js';
-import { scopedToolPaths, type LocalConfig, type TeamaiConfig } from './types.js';
+import type { LocalConfig, TeamaiConfig } from './types.js';
 import { isRunId, readRun } from './workflow/store.js';
 import { headCommit } from './workflow/worktree.js';
 import type { WorkflowEnvelope } from './workflow/types.js';
@@ -107,7 +107,7 @@ export async function workflowStart(name: string, options: { driver?: string; to
     return;
   }
   log.info(`Run ${runId} started. If it stops before it ends, continue it with: teamai workflow resume ${runId}`);
-  writeEnvelope(await runLocalDriver(config, runId, process.cwd(), { tools, toolPaths: scopedToolPaths(teamConfig, config), autoApprove: options.autoApprove }));
+  writeEnvelope(await runLocalDriver(config, runId, process.cwd(), { tools, toolPaths: teamConfig.toolPaths, autoApprove: options.autoApprove }));
 }
 
 export async function workflowNext(runId: string, options: { json?: string }): Promise<void> {
@@ -232,6 +232,6 @@ export async function workflowResume(runId: string, options: { tools?: string; a
     const lease = stored.steps.find((step) => step.status === 'leased' && step.lease.driver.kind === 'local' && step.lease.driver.machine === local.machine);
     const cwd = lease?.status === 'leased' ? lease.lease.driver.workspace
       : stored.driver?.kind === 'local' && stored.driver.machine === local.machine ? stored.driver.workspace : process.cwd();
-    return drive(cwd, { tools, toolPaths: scopedToolPaths(loaded.teamConfig, loaded.config), autoApprove: options.autoApprove });
+    return drive(cwd, { tools, toolPaths: loaded.teamConfig.toolPaths, autoApprove: options.autoApprove });
   }));
 }
