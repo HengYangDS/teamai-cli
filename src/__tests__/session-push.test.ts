@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAdapter } from '../session-flow/adapters/index.js';
 import { saveLocalConfig } from '../config.js';
 import { registerSessionFlowCommands } from '../session-flow/session-cmd.js';
-import { encodeRepoIdentity } from '../session-flow/sync.js';
+import { encodeRepoIdentity, withSessionPublicationLock } from '../session-flow/sync.js';
 import { getReportsDir, REPORTS_LOCK_FILENAME, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { ensureReportsWorktree, updateReports } from '../utils/reports-branch.js';
@@ -157,6 +157,34 @@ describe('session push for a team that keeps its workflows in the business repos
     expect(pushed.stdout).toContain('Pushed 1 session(s) from claude-code');
     expect(archived(origin, 'teamai-reports')).toContainEqual(expect.stringMatching(/\.jsonl$/));
     expect(archived(origin, 'main')).toEqual([]);
+  });
+
+  it('waits while another session command publishes the archive, then archives on teamai-reports', async () => {
+    const { origin, checkout } = repository('product');
+    project.config = {
+      repo: { localPath: path.join(checkout, '.teamai'), remote: origin, kind: 'self', businessRepoRoot: checkout },
+      username: 'alice',
+      scope: 'project',
+      projectRoot: checkout,
+      additionalRoles: [],
+      dataHome: path.join(tmp, 'data'),
+    };
+    const config = project.config;
+    await ensureReportsWorktree(config);
+    await claudeSession(checkout);
+
+    let finished = false;
+    let push: Promise<{ code: number; stdout: string; stderr: string }> | undefined;
+    await withSessionPublicationLock(getReportsDir(config), async () => {
+      push = session('push', '--source', 'claude-code', '--cwd', checkout, '-y').finally(() => { finished = true; });
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    });
+
+    expect(finished).toBe(false);
+    expect(archived(origin, 'teamai-reports')).toEqual([]);
+    const pushed = await push;
+    expect(pushed?.code, pushed?.stderr).toBe(0);
+    expect(archived(origin, 'teamai-reports')).toContainEqual(expect.stringMatching(/\.jsonl$/));
   });
 });
 
