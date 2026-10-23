@@ -34,10 +34,10 @@ describe('scopeScoring isolation', () => {
     const files = { 'scorers/scoring.yaml': 'isolation: best-effort\n', 'scorers/ops/scoring.yaml': 'isolation: verified\n' };
 
     expect(await scopeScoring(teamRepo(files, { primaryRole: 'dev' }))).toEqual({
-      ok: true, problems: [], isolation: [{ source: 'scorers/scoring.yaml isolation', value: 'best-effort' }, MACHINE],
+      ok: true, batch: undefined, problems: [], isolation: [{ source: 'scorers/scoring.yaml isolation', value: 'best-effort' }, MACHINE],
     });
     expect(await scopeScoring(teamRepo(files, { primaryRole: 'ops' }))).toEqual({
-      ok: true, problems: [], isolation: [{ source: 'scorers/ops/scoring.yaml isolation', value: 'verified' }, MACHINE],
+      ok: true, batch: undefined, problems: [], isolation: [{ source: 'scorers/ops/scoring.yaml isolation', value: 'verified' }, MACHINE],
     });
   });
 
@@ -61,8 +61,34 @@ describe('scopeScoring isolation', () => {
 
   it('drops a key it does not know, with a problem that names the file', async () => {
     expect(await scopeScoring(teamRepo({ 'scorers/scoring.yaml': 'isolation: verified\nsampling: 50\n' }))).toMatchObject({
-      ok: true, problems: ['scorers/scoring.yaml: "sampling" is not a scoring setting (isolation), so it is ignored'],
+      ok: true, problems: ['scorers/scoring.yaml: "sampling" is not a scoring setting (batch, isolation), so it is ignored'],
     });
   });
 });
 
+describe('scopeScoring batch', () => {
+  const files = { 'scorers/scoring.yaml': 'batch: true\n', 'scorers/ops/scoring.yaml': 'batch: false\n' };
+
+  it('takes an active namespace batch over the root one', async () => {
+    expect(await scopeScoring(teamRepo(files, { primaryRole: 'dev' }))).toMatchObject({ ok: true, batch: true });
+    expect(await scopeScoring(teamRepo(files, { primaryRole: 'ops' }))).toMatchObject({ ok: true, batch: false });
+  });
+
+  it('fails when two active namespaces set batch differently, and not when they agree', async () => {
+    const both = { primaryRole: 'ops', additionalRoles: ['sre'] };
+
+    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: true\n' }, both))).toEqual({
+      ok: false,
+      reason: 'batch is false in scorers/ops/scoring.yaml and true in scorers/sre/scoring.yaml, and both namespaces are active here, so nothing '
+        + 'says which one you should receive. Remove batch from one of the files, or stop declaring one of the namespaces for your roles and '
+        + 'projects. Scoring is off in this scope until the team repo fixes it.',
+    });
+    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: false\n' }, both))).toMatchObject({ ok: true, batch: false });
+  });
+
+  it('ignores a batch that is not true or false, with a problem', async () => {
+    expect(await scopeScoring(teamRepo({ 'scorers/scoring.yaml': 'batch: yes please\n' }))).toMatchObject({
+      ok: true, batch: undefined, problems: ['scorers/scoring.yaml: batch is "yes please", not true or false, so it is ignored'],
+    });
+  });
+});
