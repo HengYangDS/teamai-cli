@@ -352,8 +352,8 @@ function firstUnpublishable(runId: string, body: Record<string, unknown>, envSec
     }
   };
   const search = (value: unknown, step: string | undefined, at: Array<string | number>): SnapshotError | undefined => {
-    if (typeof value === 'string') {
-      const unfit = unfitOf(value);
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      const unfit = unfitOf(String(value));
       return unfit === undefined ? undefined : found(step, at, unfit);
     }
     if (Array.isArray(value)) {

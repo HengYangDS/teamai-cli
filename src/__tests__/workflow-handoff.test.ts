@@ -733,6 +733,17 @@ describe('workflow handoff through teamai-reports', () => {
     expect(JSON.stringify(refused)).not.toContain('493827');
   });
 
+  it('refuses to publish a declared secret a step output holds as a number', async () => {
+    const acme = team({ build: BUILD }, { 'env/secrets.yaml': 'secrets:\n  - key: ACCESS_CODE\n' });
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    await editRun(alice.config, runId, (run) => ({ ...run, steps: [{ id: 'one', ...settled, outputs: { code: 493827 } }] }));
+
+    const refused = await publishRun(alice.config, runId, { env: { ACCESS_CODE: '493827' }, checkout: alice.checkout });
+    expect(refused).toMatchObject({ ok: false, error: { code: 'secret_detected', step: 'one', field: 'outputs.code', label: 'ACCESS_CODE' } });
+    expect(originFile(acme.origin, `workflows/runs/${runId}/state.json`)).toBeNull();
+  });
+
   it('publishes text that holds a declared secret only inside a longer token, or one too short to tell from ordinary text', async () => {
     const acme = team({ build: BUILD }, { 'env/secrets.yaml': 'secrets:\n  - key: ACCESS_CODE\n  - key: RETRIES\n  - key: MODE\n' });
     const alice = await acme.member('alice');
