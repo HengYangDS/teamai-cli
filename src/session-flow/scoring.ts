@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { observedModel } from '../agent-observation.js';
 import { collectTeamSecrets } from '../env-resolution.js';
 import { loadModelAliases } from '../models/aliases.js';
@@ -23,7 +24,7 @@ import { chooseJudgeModel } from '../scorers/judge-model.js';
 import type { ScoreLabel } from '../scorers/label.js';
 import { LabelStore, reasoningPath, shareFailedLabelHint } from '../scorers/label-store.js';
 import { pinnedDefinition, type PinnedScorer } from '../scorers/pin.js';
-import { typedIn } from '../skill-use.js';
+import { typedIn, usedSkills } from '../skill-use.js';
 import type { LocalConfig } from '../types.js';
 import { log } from '../utils/logger.js';
 import { collectEnvSecrets, redact } from '../utils/redact.js';
@@ -32,7 +33,7 @@ import { agentSessionFromEnv } from '../utils/session-id.js';
 import { AgentSession } from './agent-session.js';
 import { listAvailablePlatforms, listInstalledPlatforms } from './adapters/index.js';
 import type { SubagentsRead } from './adapters/base.js';
-import { SessionCaptures } from './captures.js';
+import { SessionCaptures, type SessionCapture } from './captures.js';
 import type { Session } from './ir.js';
 
 function failure(code: string, message: string): WorkflowEnvelope {
@@ -93,6 +94,21 @@ async function sessionOf(config: LocalConfig, demand: SessionDemand): Promise<{ 
   return { error: { code: 'source_required', message: holding.length > 0
     ? `Pass --source with --session ${sessionId}: the platform that holds it. Found in: ${holding.join(', ')}.`
     : `No installed tool holds session ${sessionId}. Pass --source <platform> to read it from one of: ${listAvailablePlatforms().join(', ')}.` } };
+}
+
+/**
+ * The team skills a session's checkout held as delivered at a message's time: those of the latest capture at or before
+ * it. A message with no time takes the ones every capture records alike, else none.
+ */
+function capturedTeamSkillsAt(captures: readonly SessionCapture[]): (timestamp: string | undefined) => Readonly<Record<string, readonly string[]>> {
+  const [first, ...rest] = captures;
+  const alike = first !== undefined && rest.every((capture) => isDeepStrictEqual(capture.teamSkills ?? {}, first.teamSkills ?? {}));
+  return (timestamp) => {
+    const at = timestamp === undefined ? Number.NaN : Date.parse(timestamp);
+    if (Number.isNaN(at)) return alike ? first.teamSkills ?? {} : {};
+    const inEffect = captures.filter((capture) => Date.parse(capture.capturedAt) <= at).pop();
+    return inEffect?.teamSkills ?? {};
+  };
 }
 
 function firstPrompt(session: Session): string {
@@ -169,7 +185,9 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
   const body = keepEnds(mask(judged.body), EVIDENCE_MAX_CHARS - framing);
   const models = new Set(session.messages.flatMap((message) => message.metadata?.model ?? []));
   const [reportedModel] = models.size === 1 ? models : [];
-  const agent = SessionCaptures.agentOf(await SessionCaptures.read(config, platform, session.sessionId), reportedModel);
+  const captures = await SessionCaptures.read(config, platform, session.sessionId);
+  const agent = SessionCaptures.agentOf(captures, reportedModel);
+  const used = { skills: usedSkills(AgentSession.toolForPlatform(platform), found, capturedTeamSkillsAt(captures)) };
   const answers: Array<Record<string, unknown>> = [];
   for (const { choice, members } of groups) {
     const [head, ...tail] = members;
@@ -213,6 +231,7 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
           source: 'session',
           subject,
           ...(agent ? { agent } : {}),
+          used,
           judge: { kind: 'model', ...result.judge, ...(model ? { model } : {}), ...(members.length > 1 ? { batched: true as const } : {}) },
           scoredAt: now,
         } satisfies ScoreLabel };
@@ -227,7 +246,7 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
         const file = reasoningPath(config, version);
         log.info(`${label.scorer}: ${label.label} (score ${label.score}, ${label.passed ? 'passed' : 'did not pass'}). Reasoning: ${file}`);
         if (!label.passed) log.info(shareFailedLabelHint(file, session.sessionId));
-        answers.push({ scorer: label.scorer, subject, label: label.label, score: label.score, passed: label.passed, labelId: id, reasoning: file });
+        answers.push({ scorer: label.scorer, subject, label: label.label, score: label.score, passed: label.passed, ...(used.skills.length > 0 ? { used } : {}), labelId: id, reasoning: file });
       }
     } finally {
       await fs.rm(evidence, { recursive: true, force: true, maxRetries: 3 });

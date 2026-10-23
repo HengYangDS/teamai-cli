@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GIT_AT_START_PAYLOAD_KEY } from '../dashboard-collector.js';
 import { CAPTURE_PAYLOAD_KEY, SessionCaptures } from '../session-flow/captures.js';
 import { saveScopeSelection } from '../scope-selection.js';
@@ -12,7 +12,14 @@ import { log } from '../utils/logger.js';
 import { commitFile, fakeClaude, git, initRepo, recordDelivery } from './helpers/delivered-checkout.js';
 
 const cleanups: Array<() => void> = [];
+beforeEach(() => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'teamai-captures-home-'));
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('USERPROFILE', home);
+  cleanups.push(() => fs.rmSync(home, { recursive: true, force: true }));
+});
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
@@ -70,6 +77,32 @@ const start = (project: string, extra: Record<string, unknown> = {}): Record<str
   ({ session_id: SESSION, cwd: project, hook_event_name: 'SessionStart', source: 'startup', model: 'claude-opus-5-5', ...extra });
 
 describe('session captures (#1178)', () => {
+  it('records the team skills the checkout delivered and still holds as delivered, and no name a copy teamai did not deliver shares', async () => {
+    const { config, project, skill } = checkout();
+    const home = path.join(path.dirname(project), 'home');
+    vi.stubEnv('HOME', home);
+    commitFile(config.repo.localPath, 'skills/deploy/SKILL.md');
+    const rev = commitFile(config.repo.localPath, 'skills/docs/SKILL.md');
+    const copy = (root: string, name: string): string => {
+      const file = path.join(root, name, 'SKILL.md');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${name}\n`);
+      return file;
+    };
+    const skills = path.join(project, '.claude', 'skills');
+    const deploy = copy(skills, 'deploy');
+    const docs = copy(skills, 'docs');
+    const outside = copy(skills, 'outside');
+    await recordDelivery(config, { rev, targets: ['claude'], files: [skill, deploy, docs, outside] });
+    fs.writeFileSync(deploy, 'deploy, as the member edited it\n');
+    copy(path.join(home, '.claude', 'skills'), 'docs');
+    copy(skills, 'mine');
+
+    await SessionCaptures.atStart(config, 'claude', start(project), {});
+
+    expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamSkills)).toEqual([{ review: [skill] }]);
+  });
+
   it('sweeps the captures of a session whose file is gone a day after they were written, and keeps the rest', async () => {
     const { config, project, rev, skill } = checkout();
     await recordDelivery(config, { rev, targets: ['claude'], files: [skill] });
@@ -125,6 +158,7 @@ describe('session captures (#1178)', () => {
         driver: 'session',
         fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
       }),
+      teamSkills: { review: [skill] },
     }]);
   });
 
@@ -189,6 +223,53 @@ describe('session captures (#1178)', () => {
     await recordDelivery(config, { rev: commitFile(config.repo.localPath, 'skills/other/SKILL.md'), targets: ['claude'], files: [skill] });
     await SessionCaptures.markTeamChanged(config, 'claude', start(project), before);
     expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamChanged)).toEqual([true, true]);
+  });
+
+  it('adds the team skills the session\'s own pull delivered to its captures, and keeps the ones it started with', async () => {
+    const { config, project, rev, skill } = checkout();
+    await recordDelivery(config, { rev, targets: ['claude'], files: [skill] });
+    const captureId = await SessionCaptures.atStart(config, 'claude', start(project), {});
+
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
+    const deploy = path.join(project, '.claude', 'skills', 'deploy', 'SKILL.md');
+    fs.mkdirSync(path.dirname(deploy), { recursive: true });
+    fs.writeFileSync(deploy, 'deploy\n');
+    await recordDelivery(config, { rev: commitFile(config.repo.localPath, 'skills/deploy/SKILL.md'), targets: ['claude'], files: [skill, deploy] });
+    await SessionCaptures.markTeamChanged(config, 'claude', { ...start(project), [CAPTURE_PAYLOAD_KEY]: captureId }, before);
+
+    expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamSkills)).toEqual([{ review: [skill], deploy: [deploy] }]);
+  });
+
+  it('adds what a resume\'s pull delivered to the resume\'s capture only, not to the captures before it', async () => {
+    const { config, project, rev, skill } = checkout();
+    await recordDelivery(config, { rev, targets: ['claude'], files: [skill] });
+    await SessionCaptures.atStart(config, 'claude', start(project), {});
+    const resumed = await SessionCaptures.atStart(config, 'claude', start(project, { source: 'resume' }), {});
+
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
+    const deploy = path.join(project, '.claude', 'skills', 'deploy', 'SKILL.md');
+    fs.mkdirSync(path.dirname(deploy), { recursive: true });
+    fs.writeFileSync(deploy, 'deploy\n');
+    await recordDelivery(config, { rev: commitFile(config.repo.localPath, 'skills/deploy/SKILL.md'), targets: ['claude'], files: [skill, deploy] });
+    await SessionCaptures.markTeamChanged(config, 'claude', { ...start(project, { source: 'resume' }), [CAPTURE_PAYLOAD_KEY]: resumed }, before);
+
+    expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map((capture) => capture.teamSkills))
+      .toEqual([{ review: [skill] }, { review: [skill], deploy: [deploy] }]);
+  });
+
+  it('adds a team skill the session\'s own pull restored at the same revision, and leaves the captures unmarked', async () => {
+    const { config, project, rev, skill } = checkout();
+    await recordDelivery(config, { rev, targets: ['claude'], files: [skill] });
+    fs.rmSync(path.dirname(skill), { recursive: true });
+    const captureId = await SessionCaptures.atStart(config, 'claude', start(project), {});
+
+    const before = await SessionCaptures.checkoutDelivery(config, 'claude');
+    fs.mkdirSync(path.dirname(skill), { recursive: true });
+    fs.writeFileSync(skill, 'review\n');
+    await SessionCaptures.markTeamChanged(config, 'claude', { ...start(project), [CAPTURE_PAYLOAD_KEY]: captureId }, before);
+
+    expect((await SessionCaptures.read(config, 'claude-code', SESSION)).map(({ teamSkills, teamChanged }) => ({ teamSkills, teamChanged })))
+      .toEqual([{ teamSkills: { review: [skill] }, teamChanged: undefined }]);
   });
 
   it('gives two members on the same revision with different roles a different selection and fingerprint', async () => {

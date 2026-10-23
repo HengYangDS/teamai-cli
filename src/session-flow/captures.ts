@@ -9,6 +9,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { AgentObservationSchema, observeCheckout, settleObservation, type AgentObservation } from '../agent-observation.js';
 import { getAgentVersion } from '../agent-version.js';
+import type { CheckoutRecord } from '../pull.js';
+import { deliveredTeamSkills } from '../skill-use.js';
 import { getDataHome, type DeliverySelection, type LocalConfig } from '../types.js';
 import { acquireLock, releaseLock } from '../update.js';
 import { log } from '../utils/logger.js';
@@ -24,6 +26,8 @@ export const SessionCaptureSchema = z.object({
   teamChanged: z.literal(true).optional(),
   /** The session's file as its hook named it, so a sweep can tell when the session is gone. */
   sessionFile: z.string().optional(),
+  /** The team skills the checkout held as teamai delivered them when the session started and after its own pull (`deliveredTeamSkills`). */
+  teamSkills: z.record(z.array(z.string())).optional(),
 });
 export type SessionCapture = z.infer<typeof SessionCaptureSchema>;
 
@@ -63,9 +67,12 @@ async function atStart(config: LocalConfig, tool: string, payload: Record<string
     const agent = settleObservation({ agent: { ...reported, ...(model ? { model } : {}) }, tool, driver: { kind: 'session' } }, undefined);
     if (!agent) return undefined;
     const file = payload.transcript_path;
+    const { teamDelivery } = await import('../pull.js');
+    const delivered = (await teamDelivery(config, tool, { beforeOwnPull: true }).catch(() => undefined))?.record?.delivered;
     const capture: SessionCapture = {
       captureId: randomUUID(), platform, sessionId, capturedAt: new Date().toISOString(), agent,
       ...(typeof file === 'string' && path.isAbsolute(file) ? { sessionFile: file } : {}),
+      ...(delivered ? { teamSkills: await deliveredTeamSkills(config, cwd, delivered) } : {}),
     };
     await writeCapture(config, capture);
     return capture.captureId;
@@ -126,26 +133,50 @@ async function addToolVersion(config: LocalConfig, tool: string, payload: Record
 /** What a checkout's pull record says the checkout holds. */
 type CheckoutDelivery = { rev?: string; selection?: DeliverySelection; children?: string };
 
-/** What the pull record of the checkout `config`'s pulls deliver into says it holds. */
-async function checkoutDelivery(config: LocalConfig, tool: string): Promise<CheckoutDelivery> {
+async function checkoutRecord(config: LocalConfig, tool: string): Promise<CheckoutRecord | undefined> {
   const { teamDelivery } = await import('../pull.js');
-  const record = (await teamDelivery(config, tool).catch(() => undefined))?.record;
+  return (await teamDelivery(config, tool).catch(() => undefined))?.record;
+}
+
+function deliveryOf(record: CheckoutRecord | undefined): CheckoutDelivery {
   return { rev: record?.rev, selection: record?.selection, children: record?.children };
 }
 
+/** What the pull record of the checkout `config`'s pulls deliver into says it holds. */
+async function checkoutDelivery(config: LocalConfig, tool: string): Promise<CheckoutDelivery> {
+  return deliveryOf(await checkoutRecord(config, tool));
+}
+
+/** `capture` with the team skills of `pulled` added to those it holds. */
+function withTeamSkills(capture: SessionCapture, pulled: Record<string, string[]>): SessionCapture {
+  const teamSkills = { ...capture.teamSkills };
+  for (const [name, files] of Object.entries(pulled)) teamSkills[name] = [...new Set([...teamSkills[name] ?? [], ...files])];
+  return Object.keys(teamSkills).length > 0 ? { ...capture, teamSkills } : capture;
+}
+
 /**
- * After the session's own pull: marks its captures when that pull delivered another revision, or the same one for
- * another selection or other workspace children, than the checkout held `before` it.
+ * After the session's own pull: adds the team skills the checkout then holds as delivered to the capture this start or
+ * resume wrote, since the session may load those too from then on, also when that pull restored one at the same
+ * revision. A capture before it keeps what it held, so a load before a resume is matched as it was. Marks them when that pull
+ * delivered another revision, or the same one for another selection or other workspace children, than the checkout
+ * held `before` it.
  */
 async function markTeamChanged(config: LocalConfig, tool: string, payload: Record<string, unknown>, before: CheckoutDelivery): Promise<void> {
   const platform = AgentSession.platformForTool(tool);
-  const sessionId = payload.session_id;
+  const { session_id: sessionId, cwd, [CAPTURE_PAYLOAD_KEY]: captureId } = payload;
   if (!platform || typeof sessionId !== 'string' || !SEGMENT.test(sessionId)) return;
-  if (isDeepStrictEqual(await checkoutDelivery(config, tool), before)) return;
+  const record = await checkoutRecord(config, tool);
+  const changed = !isDeepStrictEqual(deliveryOf(record), before);
   try {
-    await rewrite(config, platform, sessionId, () => true, (capture) => ({ ...capture, teamChanged: true }));
+    const pulled = record?.delivered && typeof cwd === 'string' && typeof captureId === 'string'
+      ? await deliveredTeamSkills(config, cwd, record.delivered) : {};
+    if (!changed && Object.keys(pulled).length === 0) return;
+    await rewrite(config, platform, sessionId, () => true, (capture) => ({
+      ...(capture.captureId === captureId ? withTeamSkills(capture, pulled) : capture),
+      ...(changed ? { teamChanged: true } : {}),
+    }));
   } catch (e) {
-    log.debug(`session capture: could not mark ${platform} session ${sessionId} as changed by its pull: ${e instanceof Error ? e.message : String(e)}`);
+    log.debug(`session capture: could not record what the pull of ${platform} session ${sessionId} delivered: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
