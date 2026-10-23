@@ -722,6 +722,37 @@ describe('workflow handoff through teamai-reports', () => {
     expect(await publishRun(alice.config, runId, { env, checkout: alice.checkout })).toMatchObject({ ok: true });
   });
 
+  it('refuses to publish a declared secret shorter than the length that marks an environment value as secret', async () => {
+    const acme = team({ build: BUILD }, { 'env/secrets.yaml': 'secrets:\n  - key: ACCESS_CODE\n' });
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    await editRun(alice.config, runId, (run) => ({ ...run, inputs: { target: '493827' } }));
+
+    const refused = await publishRun(alice.config, runId, { env: { ACCESS_CODE: '493827' }, checkout: alice.checkout });
+    expect(refused).toMatchObject({ ok: false, error: { code: 'secret_detected', field: 'inputs.target', label: 'ACCESS_CODE' } });
+    expect(JSON.stringify(refused)).not.toContain('493827');
+  });
+
+  it('publishes text that holds a declared secret only inside a longer token, or one too short to tell from ordinary text', async () => {
+    const acme = team({ build: BUILD }, { 'env/secrets.yaml': 'secrets:\n  - key: ACCESS_CODE\n  - key: RETRIES\n  - key: MODE\n' });
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    await editRun(alice.config, runId, (run) => ({ ...run, inputs: { target: 'build-4938271 turned on after 1 retry' } }));
+
+    const published = await publishRun(alice.config, runId, { env: { ACCESS_CODE: '493827', RETRIES: '1', MODE: 'on' }, checkout: alice.checkout });
+    expect(published).toMatchObject({ ok: true });
+  });
+
+  it('names a declared secret too short to protect when it publishes', async () => {
+    const acme = team({ build: BUILD }, { 'env/secrets.yaml': 'secrets:\n  - key: DOOR_PIN\n' });
+    const alice = await acme.member('alice');
+    const runId = await start(alice);
+    const warn = vi.spyOn(log, 'warn');
+
+    expect(await publishRun(alice.config, runId, { env: { DOOR_PIN: '42' }, checkout: alice.checkout })).toMatchObject({ ok: true });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('DOOR_PIN'));
+  });
+
   const HOME_FILE = path.join(os.homedir(), 'private', 'customer-data.csv');
   it.each<[string, (run: RunState) => RunState, { step?: string; field: string }]>([
     ['the run inputs', (run) => ({ ...run, inputs: { file: HOME_FILE } }), { field: 'inputs.file' }],

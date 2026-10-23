@@ -49,6 +49,9 @@ const SECRET_NAME_PATTERN = /TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|(?:^|_)
 /** Minimum length before an env value is worth masking (avoids masking `KEY=1`). */
 export const MIN_ENV_VALUE_LENGTH = 8;
 
+/** Minimum length of a value the team declares secret: a shorter one cannot be told from ordinary text. */
+export const MIN_DECLARED_SECRET_LENGTH = 4;
+
 /**
  * (label, regex) pairs matched and replaced wholesale. Order matters: more
  * specific prefixes (e.g. `sk-ant-`) run before broader ones (e.g. `sk-`).
@@ -124,11 +127,17 @@ export function redact(text: string, options: RedactOptions = {}): string {
   let out = text;
 
   // Layer 1: literal env-value masking. Longest values first so a value that
-  // contains a shorter one is masked before the shorter match can fire.
+  // contains a shorter one is masked before the shorter match can fire. A value
+  // shorter than MIN_ENV_VALUE_LENGTH only matches as a whole token, so `4938`
+  // is not masked inside `build-49381`.
   const envSecrets = options.envSecrets ?? {};
   const entries = Object.entries(envSecrets).sort((a, b) => b[1].length - a[1].length);
   for (const [label, value] of entries) {
-    if (value && out.includes(value)) {
+    if (!value) continue;
+    if (value.length < MIN_ENV_VALUE_LENGTH) {
+      const token = new RegExp(`(?<![\\p{L}\\p{N}_])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'gu');
+      out = out.replace(token, () => PLACEHOLDER(label));
+    } else if (out.includes(value)) {
       out = out.split(value).join(PLACEHOLDER(label));
     }
   }
