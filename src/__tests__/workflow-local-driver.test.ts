@@ -2026,7 +2026,7 @@ steps:
     const archive = new SyncManager(getReportsDir(config));
     for (const id of archived) {
       const session = archivedSession(id);
-      archive.saveSession(session, defaultSyncMeta({
+      await archive.saveSession(session, defaultSyncMeta({
         platform: 'claude-code', author: 'alice', cwd: session.cwd, sessionId: id, repoIdentity: getRepoIdentity(workspace), title: session.title,
       }, session.createdAt));
     }
