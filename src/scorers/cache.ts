@@ -23,6 +23,8 @@ export interface SyncScorerResult {
   /** The names of the valid scorers, which steps may list. */
   cached: string[];
   invalid: ScorerDiagnostic[];
+  /** The files of the valid scorers that ask for a `verified` judge, sorted. */
+  verified: string[];
 }
 
 /** The cache stores the file's text and parses it again on load, so a cached definition is always one this teamai reads. */
@@ -38,7 +40,10 @@ type CacheEntry = z.infer<typeof CacheEntrySchema>;
 
 export type CachedScorer = Omit<CacheEntry, 'content'> & { definition: ScorerDefinition };
 
-const NOT_A_SCORER = 'not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md';
+/** The team's scoring settings beside the scorers (`scorers/settings.ts`): not a scorer. */
+export const SCORING_FILE = 'scoring.yaml';
+
+const NOT_A_SCORER = 'not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers, scoring.yaml settings and an optional README.md';
 
 function cacheDir(config: LocalConfig): string {
   const home = getDataHome(config);
@@ -80,7 +85,7 @@ export async function pinScorers(config: LocalConfig, names: Iterable<string>): 
   for (const name of new Set(names)) {
     const entry = await readCache(config, name);
     if (!entry || !(await loadCachedScorer(config, name))) continue;
-    pins[name] = { sourceHash: entry.sourceHash, ...(entry.teamRevision ? { teamRevision: entry.teamRevision } : {}), content: entry.content };
+    pins[name] = { sourceHash: entry.sourceHash, ...(entry.teamRevision ? { teamRevision: entry.teamRevision } : {}), relativePath: entry.relativePath, content: entry.content };
   }
   return pins;
 }
@@ -102,7 +107,7 @@ async function scorerCandidates(dir: string): Promise<{ candidates: NamespaceCan
   const invalid: ScorerDiagnostic[] = [];
   const walk = async (at: string, namespace: string | null): Promise<void> => {
     for (const entry of await scorerEntries(at)) {
-      if (entry.name === 'README.md') continue;
+      if (entry.name === 'README.md' || (entry.isFile() && entry.name === SCORING_FILE)) continue;
       const source = `scorers/${namespace === null ? '' : `${namespace}/`}${entry.name}`;
       if (entry.isFile() && entry.name.endsWith('.md')) {
         candidates.push({ name: entry.name.slice(0, -'.md'.length), source, namespace, value: path.join(at, entry.name) });
@@ -128,7 +133,7 @@ function namespacesOf(candidates: readonly NamespaceCandidate<string>[]): string
  * has it and withheld otherwise, and any other dir is `shared` like `scorers/` itself. With no role and no project to
  * filter by, every dir is active; when the manifest cannot be read, none is, as for prompts.
  */
-async function scorerNamespaces(config: LocalConfig, dirs: readonly string[]): Promise<{ active: string[]; shared: string[] }> {
+export async function scorerNamespaces(config: LocalConfig, dirs: readonly string[]): Promise<{ active: string[]; shared: string[] }> {
   if (dirs.length === 0) return { active: [], shared: [] };
   const resolved = await resolveResourceNamespaces(config).catch(() => undefined);
   if (resolved === undefined) return { active: [], shared: [] };
@@ -165,7 +170,7 @@ async function dropUnsettled(config: LocalConfig, settled: Set<string>): Promise
 export async function syncScorerDefinitions(config: LocalConfig, options: SyncScorerOptions = {}): Promise<SyncScorerResult> {
   const knowledgeRoot = getKnowledgeDir(config);
   const { candidates, invalid } = await scorerCandidates(path.join(knowledgeRoot, 'scorers'));
-  const result: SyncScorerResult = { cached: [], invalid };
+  const result: SyncScorerResult = { cached: [], invalid, verified: [] };
   const { active, shared } = options.everyNamespace ? { active: namespacesOf(candidates), shared: [] } : await scorerNamespaces(config, namespacesOf(candidates));
   const files: Array<{ relativePath: string; full: string }> = [];
   const byName = new Map<string, NamespaceCandidate<string>[]>();
@@ -203,6 +208,7 @@ export async function syncScorerDefinitions(config: LocalConfig, options: SyncSc
       continue;
     }
     const { name } = parsed.definition;
+    if (parsed.definition.isolation === 'verified') result.verified.push(relativePath);
     const sourceHash = createHash('sha256').update(content).digest('hex');
     const revision = await (reachable ??= remotelyReachableRevision(knowledgeRoot));
     const holds = await revisionHoldsSources(knowledgeRoot, revision, [{ path: relativePath, content }]);
@@ -222,6 +228,7 @@ export async function syncScorerDefinitions(config: LocalConfig, options: SyncSc
   }
   if (!options.dryRun) await dropUnsettled(config, new Set(result.cached));
   result.invalid.sort((left, right) => (left.file < right.file ? -1 : left.file > right.file ? 1 : 0));
+  result.verified.sort();
 
   for (const diagnostic of result.invalid) log.warn(`[scorers] ${formatScorerDiagnostic(diagnostic)}`);
   const scope = options.scopeLabel ?? config.scope;

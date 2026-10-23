@@ -47,6 +47,9 @@ import { redact } from './utils/redact.js';
 import { formatUnknownScorer, syncWorkflowDefinitions } from './workflow/cache.js';
 import { formatDiagnostic } from './workflow/parse.js';
 import { formatScorerDiagnostic } from './scorers/definition.js';
+import { SCORING_FILE } from './scorers/cache.js';
+import { requiredIsolation, unknownIsolationText } from './scorers/isolation.js';
+import { parseScoringFile } from './scorers/settings.js';
 
 // ─── Findings ────────────────────────────────────────────────────────────────
 
@@ -144,6 +147,7 @@ async function scanResources(repoDir: string, index: ManifestIndex): Promise<Rev
     const root = path.join(repoDir, ...rootRel.split('/'));
     for (const file of await listRepoFilesRecursive(root)) {
       if (type === 'workflows' && !file.endsWith('.yaml')) continue;
+      if (type === 'scorers' && path.posix.basename(file) === SCORING_FILE) continue;
       if (type === 'hooks') {
         // Hooks are reviewed by entry, the same identity pull's hooks reader
         // delivers by: hooks/a/hooks.yaml and hooks/b/hooks.yaml are two files
@@ -593,6 +597,23 @@ async function workflowFindings(repoDir: string): Promise<Finding[]> {
   }
 }
 
+/** Every `scorers/scoring.yaml` and `scorers/<dir>/scoring.yaml` of the branch, active for anyone or not: what it cannot parse, a key or value it ignores, and an isolation teamai does not know. */
+async function scoringSettingsFindings(repoDir: string, readText: (p: string) => Promise<string | null>): Promise<Finding[]> {
+  const dirs = (await fse.readdir(path.join(repoDir, 'scorers'), { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  const findings: Finding[] = [];
+  for (const relativePath of [`scorers/${SCORING_FILE}`, ...dirs.map((dir) => `scorers/${dir}/${SCORING_FILE}`)]) {
+    const text = await readText(path.join(repoDir, ...relativePath.split('/')));
+    if (text === null) continue;
+    const read = parseScoringFile(relativePath, text);
+    const messages = read.ok
+      ? [...read.problems, ...requiredIsolation([{ source: `${relativePath} isolation`, value: read.isolation }]).unknown.map(unknownIsolationText)]
+      : [read.reason];
+    findings.push(...messages.map((message): Finding => ({ level: 'fail', check: 'scorers', path: relativePath, message })));
+  }
+  return findings;
+}
+
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
 /** Every check, in the order the reporter listed them. */
@@ -612,6 +633,7 @@ export async function reviewBranchDir(branch: string, repoDir: string): Promise<
     ...await formatFindings(resources, readText),
     ...await leakFindings(repoDir, resources, readText),
     ...await workflowFindings(repoDir),
+    ...await scoringSettingsFindings(repoDir, readText),
   ];
 
   const counts: Record<FindingLevel, number> = { fail: 0, warn: 0, info: 0 };

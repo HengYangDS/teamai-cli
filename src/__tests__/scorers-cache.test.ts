@@ -69,7 +69,7 @@ describe('scorer cache', () => {
 
     const result = await syncScorerDefinitions(config);
 
-    expect(result).toEqual({ cached: ['quality'], invalid: [] });
+    expect(result).toEqual({ cached: ['quality'], invalid: [], verified: [] });
     expect(dataFiles(config)).toEqual(['scorers/cache/quality.json']);
     expect((await loadCachedScorer(config, 'quality'))?.definition).toMatchObject({ name: 'quality', passingScore: 1, prompt: 'Judge the change.\n' });
   });
@@ -86,7 +86,7 @@ describe('scorer cache', () => {
     expect(result.invalid.map(formatScorerDiagnostic)).toEqual([
       'scorers/broken.md: labels must list 2 to 20 labels: at least one that passes and one that fails',
       'scorers/broken.md: passingScore must be a number',
-      'scorers/eval.yaml: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md',
+      'scorers/eval.yaml: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers, scoring.yaml settings and an optional README.md',
     ]);
     expect(dataFiles(config)).toEqual([]);
   });
@@ -98,7 +98,7 @@ describe('scorer cache', () => {
 
     const result = await syncScorerDefinitions(config);
 
-    expect(result).toEqual({ cached: ['review-quality'], invalid: [] });
+    expect(result).toEqual({ cached: ['review-quality'], invalid: [], verified: [] });
     expect((await loadCachedScorer(config, 'review-quality'))?.relativePath).toBe('scorers/ops/review-quality.md');
   });
 
@@ -107,7 +107,7 @@ describe('scorer cache', () => {
     writeRoles(config, OPS_SCORERS);
     writeScorer(config, 'shared/x.md', VALID);
 
-    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['x'], invalid: [] });
+    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['x'], invalid: [], verified: [] });
     expect((await loadCachedScorer(config, 'x'))?.relativePath).toBe('scorers/shared/x.md');
   });
 
@@ -131,7 +131,7 @@ describe('scorer cache', () => {
     writeScorer(config, 'ops/y.md', VALID);
     writeScorer(config, 'quality.md', VALID);
 
-    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['quality'], invalid: [] });
+    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['quality'], invalid: [], verified: [] });
     expect(await loadCachedScorer(config, 'y')).toBeNull();
   });
 
@@ -140,7 +140,7 @@ describe('scorer cache', () => {
     writeRoles(config, OPS_SCORERS);
     writeScorer(config, 'ops/y.md', VALID);
 
-    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['y'], invalid: [] });
+    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['y'], invalid: [], verified: [] });
   });
 
   it('treats every namespace as inactive when the roles manifest cannot be read', async () => {
@@ -148,7 +148,7 @@ describe('scorer cache', () => {
     writeRoles(config, 'roles: [unclosed\n');
     writeScorer(config, 'ops/review-quality.md', VALID);
 
-    expect(await syncScorerDefinitions(config)).toEqual({ cached: [], invalid: [] });
+    expect(await syncScorerDefinitions(config)).toEqual({ cached: [], invalid: [], verified: [] });
   });
 
   it('lets an active namespace scorer replace the root scorer of the same name', async () => {
@@ -156,7 +156,7 @@ describe('scorer cache', () => {
     writeScorer(config, 'quality.md', VALID);
     writeScorer(config, 'ops/quality.md', VALID.replace('Judge the change.', 'Judge the deploy.'));
 
-    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['quality'], invalid: [] });
+    expect(await syncScorerDefinitions(config)).toEqual({ cached: ['quality'], invalid: [], verified: [] });
     expect(await loadCachedScorer(config, 'quality')).toMatchObject({ relativePath: 'scorers/ops/quality.md', definition: { prompt: 'Judge the deploy.\n' } });
   });
 
@@ -202,9 +202,9 @@ describe('scorer cache', () => {
     expect(result.cached).toEqual(['outside']);
     expect(result.invalid.map(formatScorerDiagnostic)).toEqual([
       expect.stringMatching(/^scorers\/ops\.: not a scorer namespace; resource namespace must be a single path segment/),
-      'scorers/ops/deep: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md',
-      'scorers/ops/eval.yaml: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md',
-      'scorers/ops/linked.md: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers and an optional README.md',
+      'scorers/ops/deep: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers, scoring.yaml settings and an optional README.md',
+      'scorers/ops/eval.yaml: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers, scoring.yaml settings and an optional README.md',
+      'scorers/ops/linked.md: not a scorer file; scorers/ holds <name>.md and <namespace>/<name>.md scorers, scoring.yaml settings and an optional README.md',
     ]);
   });
 
@@ -223,7 +223,7 @@ describe('scorer cache', () => {
     const config = testConfig();
     writeScorer(config, 'quality.md', VALID);
 
-    expect(await syncScorerDefinitions(config, { dryRun: true })).toEqual({ cached: ['quality'], invalid: [] });
+    expect(await syncScorerDefinitions(config, { dryRun: true })).toEqual({ cached: ['quality'], invalid: [], verified: [] });
     expect(dataFiles(config)).toEqual([]);
   });
 
