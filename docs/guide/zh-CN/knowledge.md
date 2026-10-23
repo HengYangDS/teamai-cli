@@ -25,7 +25,7 @@ teamai contribute --file /tmp/session.md
 teamai contribute --file /tmp/session.md --namespace payments
 ```
 
-`--namespace` 必须是当前 scope 在 `manifest/projects.yaml` 里声明的 learnings namespace。
+`--namespace` 必须是当前 scope 的项目在 `manifest/projects.yaml` 里、或其角色在 `manifest/roles.yaml` 里声明的 learnings namespace。`--namespace ""` 写入共享根目录 `learnings/`。
 
 不想要这条提醒时，在 `teamai.yaml` 里写：
 
@@ -99,7 +99,7 @@ teamai recall maintenance --update-quality
 
 `--archive` 收走置信度低于 0.15 的 learning。`--update-quality` 写出 `.draft.md`，改好后把文件名改成 `.md`。
 
-置信度是 0 到 1 的活动评分，不是知识正确或任务成功的概率。正反馈计数与召回计数的比值最高按 1 计算，因此重复正反馈不会超出这一项 30% 的权重，也不能代替近期召回这一项。
+置信度是 0 到 1 的活动评分，不是知识正确或任务成功的概率。正反馈计数与召回计数的比值最高按 1 计算，因此重复正反馈不会超出这一项 30% 的权重。近期度取最近一次召回与最近一次正反馈中较晚的时间，因此新的正反馈也会刷新近期度。
 
 ### 晋升 Learnings
 

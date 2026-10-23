@@ -22,17 +22,14 @@ import { getProjectSearchIndexPath, isSelfMode, parseInstallScope } from './type
  * the manifest.
  *
  * - Exactly one active learnings namespace → that namespace's subdir (isolated).
- * - Zero (no project, or the active projects declare no learnings namespace) →
+ * - Zero (no role or active project declares a learnings namespace) →
  *   the shared root (empty string).
  * - Multiple active learnings namespaces → the shared root, because the
  *   contribution's ownership is ambiguous. `contribute --namespace` lets the
  *   member choose one of these namespaces without changing this default.
  */
 export async function resolveLearningsSubdir(localConfig: LocalConfig): Promise<string> {
-  const namespaces = await resolveActiveLearningsNamespaces(
-    localConfig.repo.localPath,
-    localConfig.projects ?? [],
-  );
+  const namespaces = await resolveActiveLearningsNamespaces(localConfig);
   const sub = namespaces.length === 1 ? namespaces[0] : '';
   // Defense-in-depth: the namespace is a path component here. It is validated at
   // the manifest boundary, but refuse anything that isn't a safe single segment
@@ -56,9 +53,6 @@ export async function rebuildIndexAfterContribute(localConfig: LocalConfig): Pro
   const repoPath = localConfig.repo.localPath;
   const docsRepoDir = path.join(repoPath, 'docs');
   const rulesRepoDir = path.join(repoPath, 'rules');
-  // Not another repository's reports checkout (#808).
-  const { indexableVotesDir } = await import('./utils/reports-branch.js');
-  const votesDir = await indexableVotesDir(localConfig);
 
   // A workspace's children's too (#913).
   const activeLearningsNamespaces = await deliveredLearningsNamespaces(localConfig);
@@ -81,7 +75,6 @@ export async function rebuildIndexAfterContribute(localConfig: LocalConfig): Pro
     rulesDir: (await pathExists(rulesRepoDir)) ? rulesRepoDir : undefined,
     // The docs and skills pull delivers here, not the whole trees (#707).
     ...await deliveredIndexSources(localConfig),
-    votesDir: votesDir && (await pathExists(votesDir)) ? votesDir : undefined,
     voteScope: localConfig,
     indexPath,
     children: localConfig.children?.fingerprint,
@@ -199,13 +192,11 @@ export async function contribute(
   const filename = generateFilename(options.title);
   // The own selection picks the default; --namespace accepts any namespace this
   // scope reads, a workspace's children's included (#913).
-  const ownNamespaces = await resolveActiveLearningsNamespaces(
-    localConfig.repo.localPath,
-    localConfig.projects ?? [],
-  );
+  const ownNamespaces = await resolveActiveLearningsNamespaces(localConfig);
   const namespaces = await deliveredLearningsNamespaces(localConfig);
   // Validate before saving the queue, creating worktrees or rebuilding indexes.
-  if (options.namespace !== undefined &&
+  // An empty --namespace names the shared root, which every member may write.
+  if (options.namespace !== undefined && options.namespace !== '' &&
       (!isSafeNamespaceSegment(options.namespace) || !namespaces.includes(options.namespace))) {
     log.error(`Cannot contribute to namespace "${options.namespace}". Allowed learnings namespaces: ${namespaces.join(', ') || '(none)'}.`);
     process.exitCode = 1;

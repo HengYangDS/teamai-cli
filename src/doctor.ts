@@ -34,6 +34,7 @@ import { TEAMAI_HOOK_SUBCOMMANDS, isCodexTrustGatedTool, codexTrustReminder, kep
 import { codexBuildSkewMessage } from './codex-trust.js';
 import {
   buildDeliveryChecks,
+  toolPathsDroppedKeyNotes,
   buildSkillDirChecks,
   skillReadNotes,
   buildRulesDeliveryChecks,
@@ -880,6 +881,7 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
     ...await ruleChannelNotes(localConfig),
     ...[await dshSandboxNote(localConfig)].filter((note): note is string => note !== null),
     ...codexTrust.notes,
+    ...toolPathsDroppedKeyNotes(ctx),
     usageReportNote(ctx),
     // What git sees of the delivered team resources, and what no pull changes (#915).
     ...await deliveredGitExcludeNotes(ctx),

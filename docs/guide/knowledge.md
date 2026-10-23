@@ -25,7 +25,7 @@ teamai contribute --file /tmp/session.md
 teamai contribute --file /tmp/session.md --namespace payments
 ```
 
-`--namespace` must be a learnings namespace this scope declares in `manifest/projects.yaml`.
+`--namespace` must be a learnings namespace this scope's projects declare in `manifest/projects.yaml`, or its roles in `manifest/roles.yaml`. `--namespace ""` writes to the shared root `learnings/`.
 
 To stop the prompt, set this in `teamai.yaml`:
 
@@ -99,7 +99,7 @@ teamai recall maintenance --update-quality
 
 `--archive` puts aside learnings whose confidence is below 0.15. `--update-quality` writes a `.draft.md`. Rename it to `.md` when the draft is right.
 
-Confidence is an activity score from 0 to 1, not a probability that the knowledge is correct or a task succeeded. Its upvote-to-recall ratio is capped at 1, so repeated positive feedback cannot exceed that factor's 30% weight or replace the recency factor.
+Confidence is an activity score from 0 to 1, not a probability that the knowledge is correct or a task succeeded. Its upvote-to-recall ratio is capped at 1, so repeated positive feedback cannot exceed that factor's 30% weight. Recency uses the later of the last recall and the last upvote, so a fresh upvote also refreshes recency.
 
 ### Promoting Learnings
 

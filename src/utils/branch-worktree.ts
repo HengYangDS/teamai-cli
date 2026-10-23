@@ -643,7 +643,16 @@ async function commitAndPushAt(
       // when it refuses one. Do NOT re-check the remote-tracking ref here — it
       // is only updated through the remote's fetch refspec, so a `--single-branch`
       // clone would report failure for every successful side-branch push.
+      const trackingRef = `refs/remotes/origin/${spec.branch}`;
+      const before = await git.revparse(['--verify', trackingRef]).then(r => r.trim()).catch(() => '');
+      const sent = (await git.revparse([`refs/heads/${spec.branch}`])).trim();
       await git.push(['--progress', 'origin', spec.branch]);
+      // A narrow fetch refspec does not update this ref on push. Record only
+      // the commit actually accepted by origin, never an unpushed worktree HEAD.
+      // Compare-and-swap preserves a newer concurrent fetch (and a normal push
+      // may already have updated the ref). Failure cannot undo delivery.
+      await git.raw(['update-ref', trackingRef, sent, before || '0'.repeat(sent.length)])
+        .catch(() => { /* Another updater owns the newer tracking snapshot. */ });
       return { status: 'published' };
     } catch (pushErr) {
       // Killed by the block timeout: origin stopped answering, which no
@@ -766,12 +775,9 @@ async function updateImpl(
         if (!delivered) delivered = fn;
       },
     });
-    let result: PublishResult;
-    if (!change || change.files.length === 0) {
-      result = { status: 'already-present' };
-    } else {
-      result = await commitAndPushAt(spec, wt, change.message, change.files, options);
-    }
+    const result = !change
+      ? { status: 'already-present' } satisfies PublishResult
+      : await commitAndPushAt(spec, wt, change.message, change.files, options);
     if (delivered && isDelivered(result)) {
       try {
         await delivered();
