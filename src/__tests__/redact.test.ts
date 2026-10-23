@@ -80,6 +80,26 @@ describe('redact', () => {
       expect(redact('glpat-ABCDEFGHIJKLMNOPQRST')).toContain('<REDACTED:provider>');
       expect(redact('hf_ABCDEFGHIJKLMNOPQRSTUVWX')).toContain('<REDACTED:provider>');
     });
+
+    const jwt =
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV';
+    const pem =
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nsecretbody\n-----END RSA PRIVATE KEY-----';
+    const jwtPrefixes = 'eyJ-'.repeat(25_000);
+    const unendedPems = '-----BEGIN PRIVATE KEY-----\n'.repeat(40_000);
+
+    it.each([
+      ['JWT prefixes with no dot', `${jwtPrefixes} ${jwt}`, `${jwtPrefixes} <REDACTED:jwt>`],
+      ['PEM headers with no END', `${pem}\n${unendedPems}`, `<REDACTED:pem>\n${unendedPems}`],
+    ])('stays fast on %s and still masks a real one', (_shape, text, expected) => {
+      const start = performance.now();
+      const out = redact(text);
+      const elapsed = performance.now() - start;
+
+      expect(out).toBe(expected);
+      // Linear work here is a few milliseconds; rescanning to the end from every prefix takes seconds.
+      expect(elapsed).toBeLessThan(500);
+    }, 30_000);
   });
 
   describe('layer 2: structural patterns keep surrounding context', () => {
