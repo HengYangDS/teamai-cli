@@ -18,6 +18,8 @@ import {
   resolveLegacyProjectHookScope,
   resolveToolBaseDir,
   scopedToolPaths,
+  hookSettingsPath,
+  hookToolPathsForConfig,
   toolGateRoot,
 } from './types.js';
 import type { HookDef, TeamaiConfig, LocalConfig, ManagedMcpManifest, Scope } from './types.js';
@@ -1531,7 +1533,14 @@ function toClaudeEntry(def: HookDef): HookMatcher {
 }
 
 function toCursorEntry(def: HookDef): CursorHookEntry {
-  const entry: CursorHookEntry = { command: def.command };
+  // Cursor stores one `command` and, on Windows, runs it through PowerShell.
+  // Inbox Windows PowerShell rejects `||`; every PowerShell also needs `&` before
+  // a quoted Git Bash path. The per-machine hooks.json gets the same rewrite
+  // Copilot puts in its `powershell` field. POSIX injects keep `bash -lc … || true`.
+  // A team-authored command does not match the builtin wrapper and is left as written.
+  const entry: CursorHookEntry = {
+    command: process.platform === 'win32' ? copilotPowershellCommand(def.command) : def.command,
+  };
   if (def.timeout !== undefined) entry.timeout = def.timeout;
   if (def.matcher && def.matcher !== '*') entry.matcher = def.matcher;
   return entry;
@@ -2282,11 +2291,11 @@ async function reconcileZcodeFormat(
     'process.exit(status ?? 1);',
     '',
   ].join('\n');
-  if (opts.removeAll) {
+  if (opts.removeAll && !opts.teamOnly) {
     // Unconditional: after a normal inject the file equals the template, so a
     // content-diff gate never fires and the script would be left behind.
     await rm(launcherPath, { force: true });
-  } else if (process.platform === 'win32') {
+  } else if (!opts.removeAll && process.platform === 'win32') {
     // POSIX never runs the launcher — writing it there would litter ~/.zcode
     // with a script no entry references.
     const existingLauncher = await readFileSafe(launcherPath);
@@ -2361,6 +2370,10 @@ async function reconcileZcodeFormat(
   // same strategy as the Codex format.
   const isManaged = (entry: ZcodeHookMatcher): boolean => {
     const cmd = zcodeEntryCommand(entry);
+    if (opts.teamOnly) return priorTeamCommands.has(cmd);
+    if (opts.teamHookProjectRoot && isProjectGatedCommand(cmd)) {
+      return isGatedForProject(cmd, opts.teamHookProjectRoot) || priorTeamCommands.has(cmd);
+    }
     return TEAMAI_COMMAND_MARKERS.some((marker) => cmd.includes(marker)) || priorTeamCommands.has(cmd);
   };
 
@@ -3006,9 +3019,9 @@ export async function injectHooksToAllTools(toolPaths: Record<string, { settings
         log.warn(`Failed to inject Pi hook: ${(e as Error).message}`);
       }
     } else if (paths.settings) {
-      const toolRoot = path.join(resolvedBaseDir, toolGateRoot(tool, paths.settings, toolRoots));
+      const toolRoot = hookSettingsPath(tool, resolvedBaseDir, toolGateRoot(tool, paths.settings, toolRoots));
       if (!await pathExists(toolRoot)) continue;
-      const settingsPath = path.join(resolvedBaseDir, paths.settings);
+      const settingsPath = hookSettingsPath(tool, resolvedBaseDir, paths.settings);
       try {
         await injectHooks(settingsPath, tool, codexTrust);
       } catch (e) {
@@ -3254,7 +3267,7 @@ export async function reconcileHooksToAllTools(
     // ensureDir — making uninstalled tools look installed and pulling skills
     // into them on later `pull`s.
     const gateRoot = toolGateRoot(tool, paths.settings, opts.toolRoots);
-    const toolRoot = path.join(baseDir, gateRoot);
+    const toolRoot = opts.settingsOnly ? path.join(baseDir, gateRoot) : hookSettingsPath(tool, baseDir, gateRoot);
     const installedRoot = opts.installedBaseDir
       ? path.join(opts.installedBaseDir, gateRoot)
       : toolRoot;
@@ -3265,7 +3278,8 @@ export async function reconcileHooksToAllTools(
     // Existing main-checkout hooks can be removed after HOME was deleted or
     // relocated. Do not recreate the missing HOME root just to remove them.
     if (!installed && !(opts.removeAll && mainFile)) continue;
-    const settingsPath = path.join(baseDir, paths.settings);
+    // A legacy-project sweep deliberately edits the old project file.
+    const settingsPath = opts.settingsOnly ? path.join(baseDir, paths.settings) : hookSettingsPath(tool, baseDir, paths.settings);
     const settingsFileKey = path.resolve(settingsPath);
     if (claimedSettingsFiles.has(settingsFileKey)) continue;
     claimedSettingsFiles.add(settingsFileKey);
@@ -3309,7 +3323,9 @@ export async function reconcileHooksToAllTools(
             manifestPath: teamManifestPath,
             removeAll: opts.removeAll,
             builtinOverride: opts.builtinOverride,
-            teamHookProjectRoot: opts.teamHookProjectRoot,
+            teamHookProjectRoot: tool === 'zcode' && opts.scope === 'project'
+              ? opts.installedBaseDir ?? baseDir : opts.teamHookProjectRoot,
+            ...(tool === 'zcode' && opts.scope === 'project' && opts.removeAll ? { teamOnly: true } : {}),
             ...(opts.teamHookChildRoots ? { teamHookChildRoots: opts.teamHookChildRoots } : {}),
             heldTeamHookIds,
             teamHookHistory: opts.teamHookHistory,
@@ -3881,7 +3897,7 @@ export async function reconcileTeamHooksForConfig(
   // a tool that cannot run team hooks says so during the per-tool pass, and
   // the preview is only honest when the dry run repeats it — for the tools the
   // pass would actually reach, which is what hookToolPaths decides below too.
-  const hookToolPaths = scopedToolPaths(teamConfig, { ...localConfig, scope: hookScope });
+  const hookToolPaths = hookToolPathsForConfig(teamConfig, localConfig);
   if (opts.dryRun) {
     if (!opts.removeAll) await installProjectGitHook(localConfig, { dryRun: true });
     if (!opts.removeAll && 'pi' in hookToolPaths && (!filterAgents || filterAgents.includes('pi'))) {
@@ -3898,6 +3914,17 @@ export async function reconcileTeamHooksForConfig(
   const mainCheckout = await resolveMainCheckoutHooks(localConfig, teamConfig.toolPaths);
   const unwritten: string[] = [];
   const codexTrust = codexTrustPolicy(localConfig);
+  // Retire only teamai-owned entries from the unread self-scope config before
+  // the same manifest starts recording the HOME commands (which are gated).
+  const oldZcodeSettings = scopedToolPaths(teamConfig, localConfig).zcode?.settings;
+  if (isSelfMode(localConfig) && !builtinsOnly && oldZcodeSettings
+    && (!filterAgents || filterAgents.includes('zcode'))) {
+    const legacyFile = path.join(baseDir, oldZcodeSettings);
+    const homeSettings = hookToolPaths.zcode?.settings;
+    if (homeSettings && legacyFile !== hookSettingsPath('zcode', baseDir, homeSettings) && await pathExists(legacyFile)) {
+      await reconcileHooks(legacyFile, 'zcode', [], { manifestPath, removeAll: true, teamHookHistory: history });
+    }
+  }
   const reconciledMainTools = await reconcileHooksToAllTools(hookToolPaths, baseDir, teamDefs, manifestPath, {
     removeAll: opts.removeAll,
     builtinOverride: builtin,

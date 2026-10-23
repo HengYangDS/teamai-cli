@@ -130,9 +130,13 @@ teamai import --from-repo https://github.com/org/repo --skip-enrich
 
 `--from-mr` takes several MR URLs. Each draft is still confirmed on its own (or none with `--all`), the accepted learnings are published once at the end, and each repository's teamwiki is updated once. An MR that fails does not stop the rest; the run ends with a summary and exits non-zero if any failed.
 
+When GitHub import falls back from `gh` to REST, it reads commit pages of 100, up to the [GitHub endpoint's 250-commit limit](https://docs.github.com/en/rest/pulls/pulls#list-commits-on-a-pull-request). A failed commit page fails that PR before AI extraction.
+
 Each GitLab MR API request has a 30-second deadline, including reading its response body. A metadata timeout fails that MR; a commits, diff or review-threads timeout leaves out that optional data and continues. Each page of review threads gets its own deadline.
 
 The extraction reads the MR's review threads along with its description, commits and diff: GitLab discussions, GitHub review comments, reviews and conversation comments, TGit notes. Each thread goes into the prompt with the file and line it is anchored to, whether it is resolved, and its notes marked as the MR author's or a reviewer's; a decision in a resolved thread outweighs the diff. teamai's own CI comments are skipped. `--no-discussions` leaves the threads out, for `teamai ci extract-mr` too. With `language: en` in `teamai.yaml` the learning is written in English; otherwise in Chinese.
+
+If an AI-generated MR learning has a non-string `title`, the MR title is used for its summary and queued filename. Only string entries in a `tags` array are displayed. The draft content is not rewritten to repair metadata.
 
 `--incremental` re-extracts only the files changed since the last import; each codebase keeps that baseline in its own `evidence/code/<slug>/`. A remote repo's slug is `<provider>__<owner>__<repo>`, shared by `--from-repo`, `--from-mr` and `teamai ci extract-mr`; `--dir` uses the repo name.
 
@@ -149,6 +153,8 @@ teamai codebase --lint
 Without a team repo, add `--output <dir>` to both `teamai import` and `teamai codebase`; both then use `<dir>/teamwiki/`.
 
 `teamai codebase --extract` is removed; use `teamai import --dir`.
+
+AI subprocess failures report stderr when available, otherwise stdout, otherwise the exit code or termination signal. An OpenClaw provider failure printed on stdout therefore remains visible during deep enrichment instead of an empty `AI call failed:` message.
 
 A recall hit may add `Source freshness:`: `current` matches the last scan, `stale` changed, `missing` is gone, `unknown` could not be checked. `current` does not mean the written knowledge is correct.
 
