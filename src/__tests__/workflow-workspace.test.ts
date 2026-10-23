@@ -15,7 +15,7 @@ import type { LocalConfig } from '../types.js';
 import { syncWorkflowDefinitions } from '../workflow/cache.js';
 import * as engine from '../workflow/engine.js';
 import { leaseNext, parseReport, reportAttempt, startRun } from '../workflow/engine.js';
-import { runLocalDriver } from '../workflow/local-driver.js';
+import { _setDriverPollMs, runLocalDriver } from '../workflow/local-driver.js';
 import { cancelRun, respondToHitl, retryStep } from '../workflow/run-controls.js';
 import type { LocalToolAdapter } from '../workflow/local-tool-adapter.js';
 import { parseWorkflow } from '../workflow/parse.js';
@@ -26,6 +26,8 @@ import { applyBaseConfig, ensureWorktree, hooksPath, pushIfOrigin, worktreePath 
 import { launchHoldsCheckout } from '../launch-context.js';
 import { teamDelivery } from '../pull.js';
 import { pendingRecords } from '../workflow/records.js';
+
+_setDriverPollMs(20);
 
 /** Saves an edited run file under its lock, as a hand edit or an older teamai leaves one. */
 async function saveRun(config: LocalConfig, run: RunState): Promise<void> {

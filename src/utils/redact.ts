@@ -55,9 +55,18 @@ export const MIN_DECLARED_SECRET_LENGTH = 4;
 /**
  * (label, regex) pairs matched and replaced wholesale. Order matters: more
  * specific prefixes (e.g. `sk-ant-`) run before broader ones (e.g. `sk-`).
+ *
+ * A match whose `passedOver` group took part is kept unchanged. That group
+ * consumes text where the secret shape failed and would fail again from every
+ * later offset, so the scan skips it once instead of rescanning it per offset.
+ * Only that name keeps a match, so any other capture group still redacts.
  */
+function wasPassedOver(groups: unknown): boolean {
+  return typeof groups === 'object' && groups !== null && 'passedOver' in groups && typeof groups.passedOver === 'string';
+}
+
 const SECRET_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
-  ['pem', /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g],
+  ['pem', /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|(?<passedOver>[\s\S]*))/g],
   ['anthropic', /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
   ['openai', /\bsk-(?:(?:proj|svcacct|admin|None)-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,}(?![\w-]))/g],
   ['gh_pat', /\bgithub_pat_[A-Za-z0-9_]{22,}/g],
@@ -68,7 +77,7 @@ const SECRET_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ['google', /\bAIza[0-9A-Za-z_-]{35}\b/g],
   ['gcp_oauth', /\bya29\.[0-9A-Za-z_-]{20,}/g],
   ['stripe', /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}/g],
-  ['jwt', /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g],
+  ['jwt', /\beyJ(?:[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|(?<passedOver>[A-Za-z0-9_-]*))/g],
   ['sendgrid', /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g],
   ['provider', /\b(?:xai-|gsk_|pplx-|sk-or-v1-|dop_v1_|glpat-|shpat_|tfp_|nvapi-|r8_)[A-Za-z0-9_-]{16,}/g],
   // npm and Hugging Face token bodies are purely alphanumeric; allowing `_`
@@ -87,7 +96,8 @@ const BEARER_PATTERN = /\b(bearer\s+)([A-Za-z0-9._-]{16,})/gi;
 const JOINED_WORDS_PATTERN = /^[a-z]+(?:[-_.][a-z]+)+$/;
 
 /** `proto://user:PASSWORD@host` — mask only the password segment. */
-const CONNECTION_STRING_PATTERN = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]{6,})(@)/g;
+const CONNECTION_STRING_PATTERN =
+  /(?<![a-zA-Z0-9+.-])([0-9+.-]*[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]{6,})(@)/g;
 
 export interface RedactOptions {
   /**
@@ -145,7 +155,9 @@ export function redact(text: string, options: RedactOptions = {}): string {
   // Layer 2: secret-shape regexes.
   if (options.patterns !== false) {
     for (const [label, pattern] of SECRET_PATTERNS) {
-      out = out.replace(pattern, () => PLACEHOLDER(label));
+      out = out.replace(pattern, (match: string, ...rest: unknown[]) =>
+        wasPassedOver(rest.at(-1)) ? match : PLACEHOLDER(label),
+      );
     }
     out = out.replace(KV_PATTERN, (_m, key: string, sep: string) => key + sep + PLACEHOLDER('kv'));
     out = out.replace(BEARER_PATTERN, (match, scheme: string, token: string) =>
