@@ -1,4 +1,4 @@
-import { hookSettingsPath, hookToolPathsForConfig } from './types.js';
+import { hookToolPathsForConfig } from './types.js';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { detectProjectConfig, loadLocalConfig, loadTeamConfig } from './config.js';
@@ -29,7 +29,7 @@ import {
   installScopeName,
 } from './types.js';
 import { isToolInstalledForConfig } from './resources/base.js';
-import { installOf, locate, writable } from './locate.js';
+import { hookSettingsFile, installOf, locate, writable } from './locate.js';
 import { samePlace } from './resources/places.js';
 import { describeInvalidToolHomes, envToolHome, realHost, reloadToolHomes, toolHomesPath } from './tool-home.js';
 import { isToolId } from './tools.js';
@@ -257,7 +257,7 @@ async function buildHeldSurfaceChecks(ctx: DoctorContext): Promise<Check[]> {
     if (settings) {
       // reconcileHooksToAllTools injects while either root exists.
       const gateRoot = toolGateRoot(tool, settings, localConfig.toolRoots);
-      const hookRoots = [hookSettingsPath(tool, baseDir, gateRoot)];
+      const hookRoots = [hookSettingsFile(tool, baseDir, gateRoot)];
       if (localConfig.scope === 'project') hookRoots.push(path.join(localConfig.projectRoot ?? baseDir, gateRoot));
       const root = hookRoots.find((candidate) => held.has(candidate));
       if (root !== undefined && !(await Promise.all(hookRoots.map((dir) => pathExists(dir)))).includes(true)) held.get(root)?.push('hooks');
@@ -422,7 +422,7 @@ async function buildHookChecks(
     const hookPath = hookToolPaths[tool]?.hooks
       ? path.join(resolveToolBaseDir(tool, { ...localConfig, scope: resolveHookScope(localConfig).scope }), hookToolPaths[tool]?.hooks ?? paths.hooks)
       : settings
-        ? hookSettingsPath(tool, baseDir, settings)
+        ? hookSettingsFile(tool, baseDir, settings)
         : undefined;
     if (!hookPath) continue;
     const settingsPath = hookPath;
