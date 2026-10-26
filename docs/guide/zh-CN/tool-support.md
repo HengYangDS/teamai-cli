@@ -23,7 +23,7 @@ teamai 为每个工具把每类资源写到哪里，以及工具读取哪里，�
 | JoyCode | `~/.joycode` | written; reads ? | in the blocks file (JoyCode rules.txt) | `~/.joycode/rules.txt` s | written; reads ? | — | — | ? |
 | Qoder | `~/.qoder` | written; reads ? | `~/.qoder/rules` v | — | `~/.qoder/agents` s | `~/.qoder/settings.json` s | `~/.qoder/settings.json` s | — |
 | Qoder CN | `~/.qoder-cn` | written; reads ? | `~/.qoder-cn/rules` v | — | `~/.qoder-cn/agents` s | `~/.qoder-cn/settings.json` s | `~/.qoder-cn/settings.json` s | — |
-| Kiro | `~/.kiro` | written; reads ? | `~/.kiro/steering` d | — | `~/.kiro/agents` d | — | `~/.kiro/settings/mcp.json` d | — |
+| Kiro | `~/.kiro` | written; reads ? | `~/.kiro/steering` d | — | `~/.kiro/agents` d | kiro-hooks d | `~/.kiro/settings/mcp.json` d | — |
 | Trae | `~/.trae` | written; reads ? | written; reads ? | — | ? | ? | — | — |
 | Trae CN | `~/.trae-cn` | written; reads ? | written; reads ? | — | ? | ? | — | — |
 | ZCode | `~/.zcode` | written; reads ? | in the blocks file (ZCode AGENTS.md) | `~/.zcode/AGENTS.md` s | `~/.zcode/agents` s | `~/.zcode/cli/config.json` s | `~/.zcode/cli/config.json` s | — |
@@ -54,7 +54,7 @@ teamai 为每个工具把每类资源写到哪里，以及工具读取哪里，�
 | JoyCode | written; reads ? | `.joycode/rules` v | — | written; reads ? | — | — |
 | Qoder | written; reads ? | `.qoder/rules` v | — | `.qoder/agents` s | `.qoder/settings.json` s cwd only | `.qoder/settings.json` s |
 | Qoder CN | written; reads ? | `.qoder/rules` v | — | `.qoder/agents` t | `.qoder/settings.json` s cwd only | `.qoder/settings.json` t |
-| Kiro | written; reads ? | `.kiro/steering` d | — | `.kiro/agents` d | — | `.kiro/settings/mcp.json` d |
+| Kiro | written; reads ? | `.kiro/steering` d | — | `.kiro/agents` d | user hooks | `.kiro/settings/mcp.json` d |
 | Trae | written; reads ? | `.trae/rules` t | — | ? | ? | `.trae/mcp.json` d |
 | Trae CN | written; reads ? | `.trae/rules` t | — | ? | ? | `.trae/mcp.json` d |
 | ZCode | written; reads ? | session hook s | session hook s | `.zcode/agents` s cwd only | user hooks | `.zcode/config.json` s |
