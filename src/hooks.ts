@@ -2891,7 +2891,7 @@ async function reconcileOpencodePlugin(baseDir: string, removeAll = false, insta
     : false;
   if (homeInstalled || projectInstalled) {
     await injectOpencodeHooks(home, 'user');
-    const earlier = earlierHookAdapterDir('opencode-plugin');
+    const earlier = await earlierHookAdapterDir('opencode-plugin');
     if (earlier) await removeOpencodePlugin(earlier);
   }
 }
@@ -3116,6 +3116,8 @@ export async function reconcileHooksToAllTools(
     /** Collects the tools whose hook files a write failure left as they were. */
     unwritten?: string[];
     codexTrust?: CodexTrustPolicy;
+    /** The tools whose records stay: another copy of their hooks could not be cleaned, and a retry needs them (#1221). */
+    keepRecordsFor?: ReadonlySet<string>;
   } = {},
 ): Promise<Set<string>> {
   // Without the manifest, reconcileHooks manages the built-in entries only.
@@ -3343,6 +3345,7 @@ export async function reconcileHooksToAllTools(
             heldTeamHookIds,
             teamHookHistory: opts.teamHookHistory,
             codexTrust: opts.codexTrust,
+            keepRecords: opts.keepRecordsFor?.has(tool),
           });
         }
       }
