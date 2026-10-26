@@ -3783,6 +3783,8 @@ export async function sweepLegacyProjectHooks(
   toolPaths: Record<string, { settings?: string }>,
   localConfig: LocalConfig,
   reconciledMainTools: ReadonlySet<string> = new Set(),
+  /** Collects the tools whose legacy hooks a failure left in place. */
+  unwritten?: string[],
 ): Promise<void> {
   const legacy = resolveLegacyProjectHookScope(localConfig);
   if (!legacy) return;
@@ -3806,6 +3808,7 @@ export async function sweepLegacyProjectHooks(
     removeAll: true,
     settingsOnly: true,
     codexTrust,
+    unwritten,
   });
   if (toolPaths.opencode) {
     try {
@@ -3813,6 +3816,7 @@ export async function sweepLegacyProjectHooks(
       await removeOpencodeHooks(legacy.baseDir, 'project');
     } catch (e) {
       log.warn(`Failed to remove legacy OpenCode project plugin: ${(e as Error).message}`);
+      unwritten?.push('opencode');
     }
   }
   if (toolPaths.pi) {
@@ -3821,6 +3825,7 @@ export async function sweepLegacyProjectHooks(
       await removePiProjectHooks(legacy.baseDir);
     } catch (e) {
       log.warn(`Failed to remove legacy Pi project extension: ${(e as Error).message}`);
+      unwritten?.push('pi');
     }
   }
 }
