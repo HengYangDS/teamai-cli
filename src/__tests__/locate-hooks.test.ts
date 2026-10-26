@@ -145,7 +145,7 @@ const ROWS: readonly (FilesRow | OtherRow)[] = [
     source: 'a custom tool takes Claude-shaped hooks in its configured settings file, as it always has',
   },
   { tool: 'joycode', scope: 'user', channel: 'none', existingDirs: [], installed: { probe: '~/.joycode', met: false }, source: 'JoyCode 3.8.71 source: no lifecycle hooks (—s)' },
-  { tool: 'kiro', scope: 'user', channel: 'none', existingDirs: [], installed: { probe: '~/.kiro', met: false }, source: 'Kiro runs hooks from an agent config only: teamai\'s rendered agents carry them (d)' },
+  adapter('kiro', 'user', '~/.kiro/hooks', '~/.kiro', { source: 'Kiro CLI V3 docs: hook files in ~/.kiro/hooks load for every agent (#1341)' }),
   { tool: 'trae', scope: 'user', channel: 'unknown', existingDirs: [], installed: { probe: '~/.trae', met: false }, source: 'issue #1221 matrix: Trae hooks ?t' },
 ];
 

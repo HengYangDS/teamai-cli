@@ -2413,7 +2413,7 @@ export interface AgentHookDef {
 const AGENT_HOOK_FORMATS: Readonly<Record<HookFormat, boolean>> = { claude: true, codex: true, cursor: false, copilot: false, zcode: false };
 /** Which hook adapters take an agent hook (local-agent.ts dispatches each): a new adapter is refused until it is decided here. */
 const AGENT_HOOK_ADAPTERS: Readonly<Record<HookAdapterId, boolean>> = {
-  'hermes-plugin': true, 'openclaw-hook': true, 'opencode-plugin': true, 'pi-extension': true, 'omp-extension': false, 'dsh-hooks': false,
+  'hermes-plugin': true, 'openclaw-hook': true, 'opencode-plugin': true, 'pi-extension': true, 'omp-extension': false, 'dsh-hooks': false, 'kiro-hooks': false,
 };
 
 /** Whether teamai installs an agent hook for `tool`, from its user-scope hook channel. */

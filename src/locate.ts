@@ -993,6 +993,8 @@ function adapterDirIn(adapter: Exclude<HookAdapterId, 'openclaw-hook'>, homeOf: 
       return p.join(homeOf('omp'), 'agent', 'extensions');
     case 'hermes-plugin':
       return p.join(homeOf('hermes'), 'hooks');
+    case 'kiro-hooks':
+      return p.join(homeOf('kiro'), 'hooks');
     // The bridge config lives with teamai; dsh loads it through the row teamai keeps in `$DSH_HOME/cordis.patch.yml`.
     case 'dsh-hooks':
       return p.join(host.home, '.teamai', 'dsh');

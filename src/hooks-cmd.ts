@@ -109,6 +109,7 @@ async function removeAdapterHooks(adapter: HookAdapterId, dir: string): Promise<
         case 'hermes-plugin':
         case 'openclaw-hook':
         case 'dsh-hooks':
+        case 'kiro-hooks':
             return;
         default: {
             const unhandled: never = adapter;
