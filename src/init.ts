@@ -1230,10 +1230,25 @@ export async function initSelfRepo(options: GlobalOptions & {
   agent?: string | string[];
   force?: boolean;
   inheritUserScope?: boolean;
+  scope?: string;
 }): Promise<void> {
   // No preview yet, so stop before anything (#900).
   if (options.dryRun) {
     log.error(noDryRunPreview('init'));
+    process.exit(1);
+    return;
+  }
+  // Single-repo mode always installs at project scope. Ignoring an explicit
+  // --scope user would hand back a config the member did not ask for, so refuse
+  // before touching the repo (#1454).
+  if (options.scope === 'user') {
+    log.error(
+      '--scope user is not supported in single-repo mode (`teamai init --self` / `teamai init .`): '
+      + 'it installs at workspace scope. Run it again without --scope user. '
+      + 'For a user-scope install of this repo, write ~/.teamai/config.yaml by hand with '
+      + 'scope: user, username: <you>, repo.kind: self, repo.remote: <origin URL>, '
+      + 'repo.localPath: <repo>/.teamai and repo.businessRepoRoot: <repo>.',
+    );
     process.exit(1);
     return;
   }
