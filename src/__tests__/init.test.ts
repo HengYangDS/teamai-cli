@@ -257,7 +257,7 @@ import type { PublishResult } from '../utils/branch-worktree.js';
 
 describe('init', () => {
   const HOME = process.env.HOME ?? '';
-  const localPath = `${HOME}/.teamai/team-repo`;
+  const localPath = path.join(HOME, '.teamai', 'team-repo');
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1446,7 +1446,7 @@ describe('init', () => {
 // instead of letting init detect GitLab and ask for GITLAB_TOKEN.
 describe('init --provider', () => {
   const HOME = process.env.HOME ?? '';
-  const localPath = `${HOME}/.teamai/team-repo`;
+  const localPath = path.join(HOME, '.teamai', 'team-repo');
   const GITLAB_REPO = 'https://gitlab.example.test/group/team-repo.git';
   const fetchMock = vi.fn<typeof fetch>();
   const TEAM_CONFIG = {
