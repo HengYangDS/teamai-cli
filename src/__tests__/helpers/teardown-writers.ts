@@ -1,17 +1,58 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import childProcess, { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { afterAll } from 'vitest';
+import { trackDetachedProcesses } from './detached-processes.js';
 
 // A recursive removal fails with ENOTEMPTY when something keeps writing into
-// the directory while it is removed, and retries cannot outlast a writer the
-// test started and never joined. The bare error named neither, so CI failures
-// could not tell git's background upkeep from teamai's own detached work
-// (#1413). Every rmSync and fs.promises.rm in the suite now reports what
-// reappeared and which processes are still running in or on the directory.
+// the directory while it is removed. teamai's own detached work is such a
+// writer: hook-dispatch's --bg-only pass and the git hook's pull outlive the
+// CLI that started them, and a teardown that never joined them raced their
+// last write (#1413). This worker, and every node process the suite starts,
+// records each detached child it spawns, so a removal that meets ENOTEMPTY
+// waits for those children and tries once more. One that still fails reports
+// what reappeared and which processes are still running in or on the
+// directory.
+const trackerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'teamai-detached-'));
+const tracker = trackDetachedProcesses(trackerRoot);
+// Where waitForDetachedChildren finds this tracker.
+process.env.TEAMAI_TEST_DETACHED_ROOT = trackerRoot;
+process.env.NODE_OPTIONS = withTracker(process.env.NODE_OPTIONS);
+createRequire(import.meta.url)(tracker.preload);
+// A test that hands a child an environment of its own, NODE_OPTIONS included,
+// would otherwise start it untracked.
+for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork'] as const) {
+  const start = childProcess[name];
+  const tracked = (...args: unknown[]): unknown => Reflect.apply(start, childProcess, args.map(withTrackedEnv));
+  // promisify(execFile) and promisify(exec) resolve to { stdout, stderr } only through their own promisified form.
+  const promised: unknown = Reflect.get(start, promisify.custom);
+  if (typeof promised === 'function') {
+    Object.assign(tracked, { [promisify.custom]: (...args: unknown[]): unknown => Reflect.apply(promised, childProcess, args.map(withTrackedEnv)) });
+  }
+  Object.assign(childProcess, { [name]: tracked });
+}
+
+// Under the hook timeouts, so a writer that never exits fails the removal rather than the hook.
+const JOIN_MS = 10_000;
+const POLL_MS = 25;
+// Clocks a test's fake timers cannot freeze, or the join would never time out.
+const now = performance.now.bind(performance);
+
 const rmSync = fs.rmSync;
-fs.rmSync = function rmSyncNamingWriter(target, options) {
+fs.rmSync = function rmSyncJoiningWriters(target, options) {
+  try {
+    rmSync(target, options);
+    return;
+  } catch (error) {
+    if (!isNotEmptyError(error)) throw error;
+  }
+  const deadline = now() + JOIN_MS;
+  while (tracker.running().length > 0 && now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, POLL_MS);
   try {
     rmSync(target, options);
   } catch (error) {
@@ -19,7 +60,14 @@ fs.rmSync = function rmSyncNamingWriter(target, options) {
   }
 };
 const rm = fs.promises.rm;
-fs.promises.rm = async function rmNamingWriter(target, options) {
+fs.promises.rm = async function rmJoiningWriters(target, options) {
+  try {
+    await rm(target, options);
+    return;
+  } catch (error) {
+    if (!isNotEmptyError(error)) throw error;
+  }
+  await joinWriters();
   try {
     await rm(target, options);
   } catch (error) {
@@ -28,10 +76,39 @@ fs.promises.rm = async function rmNamingWriter(target, options) {
 };
 syncBuiltinESMExports();
 
+// Every config loads this setup file first, so this runs after every other
+// teardown, each removal of which could still need the tracker. A child still
+// running would fail to record its own children once the tracker is gone, so
+// the tracker stays while one runs.
+afterAll(async () => {
+  await joinWriters();
+  if (tracker.running().length === 0) fs.rmSync(trackerRoot, { recursive: true, force: true });
+});
+
+async function joinWriters(): Promise<void> {
+  const deadline = now() + JOIN_MS;
+  while (tracker.running().length > 0 && now() < deadline) await sleep(POLL_MS);
+}
+
+function withTracker(nodeOptions: string | undefined): string {
+  return nodeOptions?.includes(tracker.nodeOptions) ? nodeOptions : [nodeOptions, tracker.nodeOptions].filter(Boolean).join(' ');
+}
+
+/** `arg` with the tracker in its env's NODE_OPTIONS, when it is the options of a call that sets an env. */
+function withTrackedEnv(arg: unknown): unknown {
+  if (typeof arg !== 'object' || arg === null || !('env' in arg) || typeof arg.env !== 'object' || arg.env === null) return arg;
+  const nodeOptions = 'NODE_OPTIONS' in arg.env && typeof arg.env.NODE_OPTIONS === 'string' ? arg.env.NODE_OPTIONS : undefined;
+  return { ...arg, env: { ...arg.env, NODE_OPTIONS: withTracker(nodeOptions) } };
+}
+
 const MAX_LISTED = 10;
 
+function isNotEmptyError(error: unknown): error is Error {
+  return error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY';
+}
+
 function withWriters(error: unknown, target: fs.PathLike): unknown {
-  if (error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY') {
+  if (isNotEmptyError(error)) {
     error.message += describeWriters(target instanceof URL ? fileURLToPath(target) : target.toString());
   }
   return error;
