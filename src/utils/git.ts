@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import fse from 'fs-extra';
-import simpleGit, { type SimpleGit, type outputHandler } from 'simple-git';
+import { simpleGit, type SimpleGit, type outputHandler } from 'simple-git';
 import { z } from 'zod';
 import { execCommand } from './exec.js';
 import { GitAnswers } from './git-answers.js';
@@ -181,9 +181,18 @@ export function createGit(basePath?: string, abort?: AbortSignal): SimpleGit {
   // Role filtering happens after checkout: an inactive skill's long path can
   // otherwise block the whole pull. Keep this override in the Git process.
   const config = process.platform === 'win32' ? ['core.longpaths=true'] : [];
-  const git = basePath
-    ? simpleGit({ baseDir: basePath, binary: gitBinary(), abort, config })
-    : simpleGit({ binary: gitBinary(), abort, config });
+  const git = simpleGit({
+    ...(basePath ? { baseDir: basePath } : {}),
+    binary: gitBinary(),
+    abort,
+    config,
+    // Preserve identity and noninteractive operation under the v4 environment guard.
+    allowEnvironment: [
+      'GIT_TERMINAL_PROMPT',
+      'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+      'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+    ],
+  });
   return git.outputHandler(markOutputSeen);
 }
 
@@ -1129,8 +1138,9 @@ export async function resolveAnchors(cwd?: string): Promise<ProjectAnchors | nul
 async function readAnchors(cwd?: string): Promise<ProjectAnchors | null> {
   if (await gitFindsNoRepository(cwd ?? process.cwd())) return null;
   try {
-    const git = createGit(cwd);
-    const toplevel = (await checkoutLocation(cwd ?? process.cwd()))?.toplevel ?? (await git.revparse(['--show-toplevel'])).trim();
+    const dir = cwd ?? process.cwd();
+    const located = await checkoutLocation(dir);
+    const toplevel = located?.toplevel ?? (await execCommand('git', ['rev-parse', '--show-toplevel'], { cwd: dir, timeoutMs: 10_000 })).stdout.trim();
     const entries = await readWorktreeList(cwd) ?? await readWorktreeList(cwd, true);
     const first = entries?.[0];
     if (!toplevel || !first) return null;
@@ -1139,11 +1149,12 @@ async function readAnchors(cwd?: string): Promise<ProjectAnchors | null> {
     const commonDir = await gitCommonDir(workspaceRoot);
     let mainCheckout: string | null = first.bare ? null : projectAnchor;
     if (!first.bare && projectAnchor === commonDir) {
-      const worktree = await git.raw(['--git-dir', commonDir, 'config', '--get', 'core.worktree']).catch(() => '');
+      const worktree = await execCommand('git', ['--git-dir', commonDir, 'config', '--get', 'core.worktree'], { cwd: workspaceRoot, timeoutMs: 10_000 })
+        .then(({ code, stdout }) => code === 0 ? stdout : '').catch(() => '');
       if (worktree.trim()) {
         mainCheckout = await realpath(path.resolve(commonDir, worktree.trim()));
       } else {
-        const gitDir = await realpath(path.resolve(cwd ?? process.cwd(), (await git.revparse(['--git-dir'])).trim()));
+        const gitDir = await realpath(path.resolve(dir, (await execCommand('git', ['rev-parse', '--git-dir'], { cwd: dir, timeoutMs: 10_000 })).stdout.trim()));
         mainCheckout = gitDir === commonDir ? workspaceRoot : null;
       }
     }
@@ -1252,9 +1263,9 @@ export async function gitCommonDir(cwd: string): Promise<string | null> {
   const located = await checkoutLocation(cwd);
   if (located) return located.commonDir;
   try {
-    // Inside the try: simple-git throws at once for a directory that does not exist.
-    const out = (await createGit(cwd).revparse(['--git-common-dir'])).replace(/\r?\n$/, '');
-    return await realpath(path.resolve(await realpath(cwd), out));
+    const result = await execCommand('git', ['rev-parse', '--git-common-dir'], { cwd, timeoutMs: 10_000 });
+    if (result.code !== 0) return null;
+    return await realpath(path.resolve(await realpath(cwd), result.stdout.replace(/\r?\n$/, '')));
   } catch {
     return null;
   }
@@ -1338,8 +1349,9 @@ async function readWorktreeList(cwd?: string, newlineSplit = false): Promise<Lis
   const linked = commonDir === null ? null : await linkedWorktreesStamp(commonDir);
   const readList = async (): Promise<string | null> => {
     try {
-      // Inside the try: simple-git throws at once for a directory that does not exist.
-      return await createGit(cwd).raw(['worktree', 'list', '--porcelain', ...newlineSplit ? [] : ['-z']]);
+      // Discovery must use the same repository environment as checkoutLocation.
+      const result = await execCommand('git', ['worktree', 'list', '--porcelain', ...newlineSplit ? [] : ['-z']], { cwd: dir, timeoutMs: 10_000 });
+      return result.code === 0 ? result.stdout : null;
     } catch {
       return null;
     }
