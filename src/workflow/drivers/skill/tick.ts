@@ -3,6 +3,7 @@
  * effect, and feeds each answer back as the next input. It holds the lock only while it ticks, never across a sleep.
  */
 import { driverIdentity } from '../../../driver-identity.js';
+import type { ToolId } from '../../../types.js';
 import { canonicalJson } from '../../../utils/canonical-json.js';
 import type { RunReadied } from '../../protocol.js';
 import type { AttemptId, RunId, RunLock } from '../../store.js';
@@ -163,7 +164,7 @@ async function attemptCheckRow(context: SkillContext, state: SkillState, open: A
 export function plannedState(context: SkillContext, run: RunId, planned: StartRun): SkillState {
   return newSkillState({
     run, driver: driverIdentity('skill', context.cwd), invocation: context.invocation, options: { parallel: planned.parallel, hitl: planned.hitl, mode: context.mode },
-    host: planned.host, session: context.session, at: context.now().toISOString(), ...(planned.judge !== undefined ? { judge: planned.judge } : {}),
+    host: planned.host, session: context.session, tool: context.tool, at: context.now().toISOString(), ...(planned.judge !== undefined ? { judge: planned.judge } : {}),
   });
 }
 
@@ -289,7 +290,7 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
     const taken = traced(context, readiedRow({
       run, readied, kept: state !== undefined, mode: context.mode, ...(local !== undefined ? { local } : {}), ...(attended !== undefined ? { attended } : {}), answers,
     }));
-    if (taken && 'answer' in taken) return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, localTool }) } };
+    if (taken && 'answer' in taken) return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, localTool, tool: input.resume?.tool }) } };
     if (taken) {
       return { state: plannedState(context, run, taken.start) };
     }
@@ -297,7 +298,7 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
   const unattended = state && context.mode === 'unattended' && (input.resume !== undefined || input.takeover) ? traced(context, unattendedRow(state, answers)) : undefined;
   const kept = unattended?.state ?? state;
   if (kept && input.report !== undefined && traced(context, reportCallRow(kept, input.report))) return { state: kept };
-  const taken = traced(context, callRow(kept, { run, session: context.session, at: context.now().toISOString(), takeover: input.takeover !== undefined }));
+  const taken = traced(context, callRow(kept, { run, session: context.session, tool: context.tool, at: context.now().toISOString(), takeover: input.takeover !== undefined }));
   if ('answer' in taken) return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, run, localTool }) } };
   return { state: taken.state };
 }
@@ -312,19 +313,24 @@ function rendered(state: SkillState, answer: TurnAnswer, input: { events: TurnEv
   });
 }
 
+/** The prompt tool a local start or resume of `state`'s run names: the tool of the session that drives it, when known. */
+function runPromptTool(context: SkillContext, state: SkillState): string | undefined {
+  return localPromptTool({ ...context, tool: state.orchestrator.tool ?? context.tool });
+}
+
 /** D20: saves `state` as shown to the calling session and answers its turn. */
 async function finish(context: SkillContext, lock: RunLock, state: SkillState, ticked: TickTurn): Promise<SkillAnswer> {
   const events = unseenEvents(state, context.session);
   const shown = traced(context, turnRow(state, { session: context.session, ticked }));
   await writeSkillState(context.config, lock, shown.state, context.env.secrets);
-  return { data: { turn: rendered(shown.state, shown.turn, { events, ...(shown.waiting ? { waiting: shown.waiting } : {}), localTool: localPromptTool(context) }) } };
+  return { data: { turn: rendered(shown.state, shown.turn, { events, ...(shown.waiting ? { waiting: shown.waiting } : {}), localTool: runPromptTool(context, shown.state) }) } };
 }
 
 /**
  * A `resume --driver skill`: `claim` takes the run from another install that owns it; `confirmed`, the person's yes to
  * continue a run of an `invoke: ask` workflow; `answers`, its options.
  */
-interface Resume { claim: boolean; confirmed: boolean; answers: ResumeAnswers }
+interface Resume { claim: boolean; confirmed: boolean; answers: ResumeAnswers; tool?: ToolId }
 
 /**
  * A call that answers with a turn at once: `next`, a takeover, a resume, an answer to the host question, an ack, a place
@@ -346,7 +352,7 @@ function literalOf(invocation: Invocation, run: RunId, call: ForegroundCall): Li
     case 'takeover':
       return takeoverLiteral(invocation, run, { confirmed: call.confirmed });
     case 'resume':
-      return skillResumeLiteral(invocation, run, { claim: call.claim, ...call.answers, noJudge: call.answers.judge === false, confirmed: call.confirmed });
+      return skillResumeLiteral(invocation, run, { claim: call.claim, ...call.answers, noJudge: call.answers.judge === false, confirmed: call.confirmed, tool: call.tool });
     case 'choose':
       return chooseHostLiteral(invocation, run, call.choice);
     case 'ack':
@@ -534,7 +540,7 @@ export async function poll(context: SkillContext, run: RunId): Promise<SkillAnsw
       last = 'state' in polled ? polled.state : result.state;
       await writeSkillState(context.config, lock, last, context.env.secrets);
       if (!('turn' in polled)) return 'sleep';
-      return { data: { turn: rendered(last, polled.turn, { events, ...(polled.waiting ? { waiting: polled.waiting } : {}), localTool: localPromptTool(context) }) } };
+      return { data: { turn: rendered(last, polled.turn, { events, ...(polled.waiting ? { waiting: polled.waiting } : {}), localTool: runPromptTool(context, last) }) } };
     }, 0);
     switch (ticked.kind) {
       case 'held':

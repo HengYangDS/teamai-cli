@@ -2,7 +2,8 @@
 import { z } from 'zod';
 import { DriverSchema } from '../../../driver-identity.js';
 import { RunModeSchema } from '../../../launch-context.js';
-import type { LocalConfig } from '../../../types.js';
+import { isToolId } from '../../../tools.js';
+import type { LocalConfig, ToolId } from '../../../types.js';
 import { readFileSafe, writeJsonAtomic } from '../../../utils/fs.js';
 import { redactJson } from '../../../utils/redact.js';
 import type { HostPlaceRequest, RunVersion } from '../../protocol.js';
@@ -155,12 +156,19 @@ const SkillStateSchema = z.object({
     z.object({ kind: z.literal('chosen'), id: z.enum(HOST_CHOICES), children: z.enum(['parallel', 'serial']), places: z.enum(['teamai', 'host']) }),
   ]),
   gate: GateSchema.optional(),
-  /** The session that drives the run, when its host names one, and when it last called. */
-  orchestrator: z.object({ session: z.string().optional(), lastCallAt: z.string() }),
+  /**
+   * The session that drives the run, when its host names one, and when it last called. `tool`: the tool that session
+   * works in, which `--tools default=<tool>` names or its host does, so a runner resolves its children's models for it;
+   * dropped when this teamai knows no such tool.
+   */
+  orchestrator: z.object({ session: z.string().optional(), tool: z.custom<ToolId>((tool) => typeof tool === 'string' && isToolId(tool)).optional().catch(undefined), lastCallAt: z.string() }),
   attempts: z.array(AttemptStateSchema),
   /** Present while this driver judges the run's scored steps with the confined judge of `tool`. `open`: the judge running now. */
   judging: z.object({ tool: z.string(), open: JudgeSchema.optional() }).optional(),
-  /** Present when the session itself judges the run's scored steps with `tool` once the run is done, as no verified judge of `tool` is here. */
+  /**
+   * Present when the session itself judges the run's scored steps once the run is done, as no verified judge of `tool`,
+   * the session's tool at the start, is here. The session judges with the run's tool, `orchestrator.tool`, else `tool`.
+   */
   sessionJudge: z.object({ tool: z.string() }).optional(),
   /** The sequence number of the last event. */
   seq: z.number().int(),
@@ -178,16 +186,16 @@ const SkillStateSchema = z.object({
 export type SkillState = z.infer<typeof SkillStateSchema>;
 
 /**
- * The state of a run this driver starts to drive for `session`, from `at` on: nothing open and nothing shown yet, and
- * `judge`, who judges its scored steps on this machine, when anyone does.
+ * The state of a run this driver starts to drive for `session`, working in `tool`, from `at` on: nothing open and nothing
+ * shown yet, and `judge`, who judges its scored steps on this machine, when anyone does.
  */
 export function newSkillState(input: {
-  run: RunId; driver: SkillState['driver']; invocation: SkillState['invocation']; options: SkillState['options']; host: 'none' | 'pending'; session: string | undefined; at: string; judge?: JudgedBy;
+  run: RunId; driver: SkillState['driver']; invocation: SkillState['invocation']; options: SkillState['options']; host: 'none' | 'pending'; session: string | undefined; tool: ToolId | undefined; at: string; judge?: JudgedBy;
 }): SkillState {
-  const { run, driver, invocation, options, host, session, at, judge } = input;
+  const { run, driver, invocation, options, host, session, tool, at, judge } = input;
   return {
     version: 1, run, driver, invocation, options, host: { kind: host },
-    orchestrator: { ...(session !== undefined ? { session } : {}), lastCallAt: at },
+    orchestrator: { ...(session !== undefined ? { session } : {}), ...(tool !== undefined ? { tool } : {}), lastCallAt: at },
     attempts: [], ...judgingState(judge), seq: 0, events: [], seen: {}, settled: [],
   };
 }
