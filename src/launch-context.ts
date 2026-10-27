@@ -69,7 +69,7 @@ export function resolveRunMode(env: NodeJS.ProcessEnv): RunMode {
  */
 export const ATTEMPT_ENV = 'TEAMAI_WORKFLOW_ATTEMPT';
 
-/** The variable that names who launched a tool's session: `workflow` for a step, `scorer` for a judge. */
+/** The variable that names who launched a tool's session: `workflow` for a step, `scorer` for a judge, or the {@link LaunchedBy} caller of one of teamai's own AI calls. */
 export const LAUNCHED_BY_ENV = 'TEAMAI_LAUNCHED_BY';
 
 /**
@@ -102,6 +102,14 @@ export function readSessionRun(payload: Readonly<Record<string, unknown>>): Sess
   const parsed = SessionRunSchema.safeParse(payload[SESSION_RUN_PAYLOAD_KEY]);
   return parsed.success ? parsed.data : undefined;
 }
+
+/**
+ * Who in teamai launched a tool's session, as `TEAMAI_LAUNCHED_BY` carries it: a workflow step, a scorer judge, or the
+ * module whose AI call started it.
+ */
+export type LaunchedBy =
+  | 'workflow' | 'scorer'
+  | 'codebase' | 'deep-enrich' | 'enrich-with-ai' | 'import-local' | 'iwiki-dual' | 'import-mr' | 'recall-promote' | 'quality-update' | 'votes-judge';
 
 /** A tool launched by a workflow step, in the checkout whose pull record has key `checkout`. */
 export type Launch = { by: 'workflow'; tool: string; checkout: string };

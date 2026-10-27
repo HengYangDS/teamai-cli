@@ -14,9 +14,15 @@ import {
   NotInitializedError,
   detectProjectConfig,
   findUnreadableProjectConfig,
+  hasUserScopeInstall,
+  loadLocalConfigForScope,
+  aiToolSettings,
   requireInit,
+  saveLocalConfig,
+  saveLocalConfigForScope,
   UnreadableProjectConfigError,
 } from '../config.js';
+import type { LocalConfig } from '../types.js';
 import { projectDataHome } from '../utils/partition.js';
 import { log } from '../utils/logger.js';
 
@@ -41,6 +47,28 @@ describe('requireInit: missing config versus unreadable config', () => {
 
   it('is NotInitializedError when there is no config file', async () => {
     await expect(requireInit()).rejects.toBeInstanceOf(NotInitializedError);
+  });
+
+  it("is NotInitializedError, with nothing logged, when the file holds only the member's settings", async () => {
+    const configPath = path.join(home, '.teamai', 'config.yaml');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, 'ai:\n  tool: codex\n');
+    vi.mocked(log.error).mockClear();
+
+    await expect(requireInit()).rejects.toBeInstanceOf(NotInitializedError);
+    expect(log.error).not.toHaveBeenCalled();
+    expect(await hasUserScopeInstall()).toBe(false);
+    expect(await aiToolSettings(undefined)).toEqual([{ level: 'machine', tool: 'codex', file: configPath }]);
+  });
+
+  it("loads no user scope, with nothing logged, when the file holds only the member's settings", async () => {
+    const configPath = path.join(home, '.teamai', 'config.yaml');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, 'ai:\n  tool: codex\n');
+    vi.mocked(log.error).mockClear();
+
+    expect(await loadLocalConfigForScope('user')).toBeNull();
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it('names the file, and is not NotInitializedError, when the config exists but does not parse', async () => {
@@ -273,3 +301,45 @@ describe('findUnreadableProjectConfig', () => {
   });
 });
 
+describe("the member's ai.tool across a write of the config file", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'teamai-config-ai-'));
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  /** A fresh install's config, as init builds it: no `ai`. */
+  function freshInstall(scope: LocalConfig['scope'], dataHome?: string): LocalConfig {
+    return { repo: { localPath: path.join(home, 'team'), remote: 'https://example.com/team.git' }, username: 'member', scope, additionalRoles: [], ...(dataHome ? { dataHome, projectRoot: path.join(home, 'project') } : {}) };
+  }
+
+  it('keeps the ai.tool a member wrote in ~/.teamai/config.yaml when a user-scope init writes the file', async () => {
+    const machineFile = path.join(home, '.teamai', 'config.yaml');
+    fs.mkdirSync(path.dirname(machineFile), { recursive: true });
+    fs.writeFileSync(machineFile, 'ai:\n  tool: codex\n');
+
+    await saveLocalConfig(freshInstall('user'));
+
+    expect(await hasUserScopeInstall()).toBe(true);
+    expect(await aiToolSettings(undefined)).toEqual([{ level: 'machine', tool: 'codex', file: machineFile }]);
+  });
+
+  it("keeps a project's ai.tool when a re-init writes the project's config", async () => {
+    const dataHome = path.join(home, '.teamai', 'projects', 'project');
+    const projectFile = path.join(dataHome, 'config.yaml');
+    fs.mkdirSync(dataHome, { recursive: true });
+    fs.writeFileSync(projectFile, 'ai:\n  tool: opencode\n');
+    const config = freshInstall('project', dataHome);
+
+    await saveLocalConfigForScope(config);
+
+    expect(await aiToolSettings(config)).toEqual([{ level: 'project', tool: 'opencode', file: projectFile }]);
+  });
+});

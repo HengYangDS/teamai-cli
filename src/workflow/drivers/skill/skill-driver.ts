@@ -92,6 +92,8 @@ export interface SkillContext {
   mode: RunMode;
   /** The tool of that session, which a child's model is resolved for; undefined when its host names none. */
   tool: ToolName | undefined;
+  /** The tools the member names for `config`'s scope, the most specific first: TEAMAI_AI_TOOL, then `ai.tool`. */
+  aiTools: readonly string[];
   invocation: Invocation;
   /** The checkout a start runs from. */
   cwd: string;
@@ -106,7 +108,7 @@ export interface SkillContext {
  * The context of a call from this process: its agent session, how the member ran teamai, the in-process protocol,
  * detached runners, and the real clock.
  */
-export async function skillContext(input: Pick<SkillContext, 'config' | 'toolPaths' | 'env' | 'cwd' | 'trace'>): Promise<SkillContext> {
+export async function skillContext(input: Pick<SkillContext, 'config' | 'toolPaths' | 'env' | 'cwd' | 'aiTools' | 'trace'>): Promise<SkillContext> {
   const { config, env } = input;
   const session = await agentSessionFromEnv();
   const evidence = agentEvidence(process.env);
@@ -329,7 +331,7 @@ async function start(call: Extract<SkillCall, { kind: 'describe' | 'start' }>, c
       mode: context.mode, ...(attended !== undefined ? { attended } : {}),
     });
     context.trace?.(row);
-    return { data: { describe: { workflow: description, judging, ask: askFor(verdict, description, context.invocation, judging, { tool: localPromptTool(context.config, context.tool) }) } } };
+    return { data: { describe: { workflow: description, judging, ask: askFor(verdict, description, context.invocation, judging, { tool: localPromptTool(context) }) } } };
   }
   const check = checkStartAnswers({ description, answers: call.answers, inputs: call.inputs, ceiling });
   const judge = judging.kind === 'here' && call.answers.judge !== false ? judging.tool : undefined;
@@ -339,7 +341,7 @@ async function start(call: Extract<SkillCall, { kind: 'describe' | 'start' }>, c
   if (taken.row === 'R25') return { error: { ...taken.error, next: null } };
   if (taken.row !== 'R10') {
     const same = describeLiteral(context.invocation, description.name);
-    return { error: errorOf({ kind: 'error', refusal: taken.refusal }, { invocation: context.invocation, same, localTool: localPromptTool(context.config, context.tool) }) };
+    return { error: errorOf({ kind: 'error', refusal: taken.refusal }, { invocation: context.invocation, same, localTool: localPromptTool(context) }) };
   }
   const planned = taken.start;
   const started = await context.client.start(description.name, {

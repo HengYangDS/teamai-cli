@@ -7,14 +7,15 @@ import YAML from 'yaml';
 import matter from 'gray-matter';
 
 import { findPromotionCandidates, executePromotion } from '../maintenance/promote.js';
+import { CallError, callTool } from '../tool-launch/call.js';
 import type { UserVotesV2 } from '../types.js';
 
-// Mock AI client to avoid real CLI calls in tests
-vi.mock('../utils/ai-client.js', () => ({
-  callClaude: vi.fn(async (prompt: string) => {
-    if (prompt.includes('Classify')) return 'skills';
-    return '---\ntitle: promoted content\ntags: [test]\ndate: 2026-07-03\n---\nPromoted by AI.';
-  }),
+vi.mock('../tool-launch/call.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../tool-launch/call.js')>(),
+  callTool: vi.fn(async (prompt: string) => ({
+    tool: 'claude',
+    text: prompt.includes('Classify') ? 'skills' : '---\ntitle: promoted content\ntags: [test]\ndate: 2026-07-03\n---\nPromoted by AI.',
+  })),
 }));
 
 let tmpDir: string;
@@ -81,7 +82,8 @@ describe('findPromotionCandidates', () => {
     const candidates = await findPromotionCandidates([learningsDir], votesDir, undefined);
     expect(candidates.length).toBeGreaterThan(0);
     expect(candidates[0].docId).toBe('great-doc');
-    expect(candidates[0].suggestedCategory).toBeDefined();
+    expect(candidates[0].suggestedCategory).toBe('skills');
+    expect(callTool).toHaveBeenCalledWith(expect.stringContaining('Classify'), expect.objectContaining({ launchedBy: 'recall-promote' }));
   });
 
   it('skips already-promoted learnings', async () => {
@@ -188,6 +190,8 @@ describe('executePromotion', () => {
     const original = fs.readFileSync(path.join(learningsDir, 'ready.md'), 'utf-8');
     const { data } = matter(original);
     expect(data.promoted_to).toBe('skills/ready/SKILL.md');
+    expect(fs.readFileSync(path.join(skillsDir, 'ready', 'SKILL.md'), 'utf-8')).toContain('Promoted by AI.');
+    expect(callTool).toHaveBeenCalledWith(expect.stringContaining('promoting a team learning'), expect.objectContaining({ launchedBy: 'recall-promote' }));
   });
   it('promotes a namespaced learning keeping the namespace in target path', async () => {
     const learningsDir = path.join(tmpDir, 'learnings');
@@ -245,5 +249,16 @@ describe('executePromotion', () => {
     const original = fs.readFileSync(absPath, 'utf-8');
     const { data } = matter(original);
     expect(data.promoted_to).toBe('skills/k8s/helm-values/SKILL.md');
+  });
+
+  it('fails, writing nothing, when the member names an AI tool teamai cannot run', async () => {
+    const learningsDir = path.join(tmpDir, 'learnings');
+    fs.mkdirSync(learningsDir, { recursive: true });
+    makeLearning(learningsDir, 'ready');
+    vi.mocked(callTool).mockRejectedValueOnce(new CallError('override_invalid', 'TEAMAI_AI_TOOL is "gemini", which is not a tool teamai launches.'));
+    const candidate = { docId: 'ready', filename: 'ready.md', path: path.join(learningsDir, 'ready.md'), confidence: 0.95, upvotedCount: 10, userCount: 3, title: 'ready', suggestedCategory: 'skills' as const };
+
+    await expect(executePromotion(candidate, tmpDir, { category: 'skills' })).rejects.toThrow('TEAMAI_AI_TOOL is "gemini"');
+    expect(fs.existsSync(path.join(tmpDir, 'skills'))).toBe(false);
   });
 });
