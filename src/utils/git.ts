@@ -1489,10 +1489,19 @@ export async function getFileContentWhenAdded(repoPath: string, filePath: string
   }
 }
 
-/** Full commit id of `rev` (HEAD by default), or null when it names none. */
-export async function getHeadCommit(localPath: string, rev = 'HEAD'): Promise<string | null> {
+/** Full commit id of `rev` (HEAD by default), or null when it names none, or git fails or is aborted. */
+export async function getHeadCommit(localPath: string, rev = 'HEAD', abort?: AbortSignal): Promise<string | null> {
   try {
-    return (await createGit(localPath).raw(['rev-parse', '--verify', `${rev}^{commit}`])).trim() || null;
+    return (await createGit(localPath, abort).raw(['rev-parse', '--verify', `${rev}^{commit}`])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The branch checked out, or null on a detached HEAD, or when git fails or is aborted. */
+export async function getCurrentBranch(localPath: string, abort?: AbortSignal): Promise<string | null> {
+  try {
+    return (await createGit(localPath, abort).raw(['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim() || null;
   } catch {
     return null;
   }

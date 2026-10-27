@@ -9,6 +9,7 @@ import { channelsOf } from './tools.js';
 import type { WorkspaceChildren } from './workspace-children.js';
 import type { HeadState } from './utils/git.js';
 import type { RunMode } from './launch-context.js';
+import type { OutcomeKind, SessionUsage, WorkOutcome } from './outcomes.js';
 import { AllowSchema } from './workflow/requirements.js';
 
 const COPILOT_USER_MCP_CONFIG = 'mcp-config.json';
@@ -1826,7 +1827,19 @@ export interface UserStats {
    */
   attended?: UserModeStats;
   unattended?: UserModeStats;
+  /**
+   * The member's finished sessions by run mode and outcome kind (#1387), `none` for a session that delivered nothing.
+   * A session with a pull request and a learning is in both rows, so rows do not add up. Counts only: no session id,
+   * commit sha, pull request URL or learning id leaves the machine.
+   */
+  outcomes?: UserOutcomeStats;
 }
+
+/** What a row of {@link UserStats.outcomes} counts: its sessions, and their tokens and interventions in total. */
+export type OutcomeCounts = SessionUsage & { sessions: number };
+
+/** {@link UserStats.outcomes}: rows by run mode (`notRecorded` without one), then by outcome kind or `none`. */
+export type UserOutcomeStats = Partial<Record<RunMode | 'notRecorded', Partial<Record<OutcomeKind | 'none', OutcomeCounts>>>>;
 
 /** The counters of {@link UserStats} one run mode holds. */
 export type UserModeStats = Pick<UserStats, 'interventions' | 'prompts' | 'tokens' | 'daily'>;
@@ -2023,6 +2036,13 @@ export interface DashboardEvent {
    * existed.
    */
   gitAtStart?: HeadState;
+  /**
+   * On `stop` only: the commit checked out at `cwd` when the Stop fired. A session's commits are those its member
+   * authored from its start's `gitAtStart.head` to its last Stop's `gitHead` (#1387). Absent where `gitAtStart` would be.
+   */
+  gitHead?: string;
+  /** On `stop` only, beside `gitHead`: the branch checked out then, whose pull request the session delivered to. Absent on a detached HEAD. */
+  gitBranch?: string;
   /** Last event timestamp the PID monitor observed, so a delayed exit targets that run. */
   processExitAfter?: string;
   /** Byte boundary captured at Copilot SessionStart; private log path is never stored. */
@@ -2117,6 +2137,8 @@ export interface DashboardSession {
   promptCount: number;
   /** Cumulative token usage for this session (zero when no transcript usage). */
   tokens: TokenUsage;
+  /** What the session delivered so far (#1387): learnings recorded for it, and what the usage report found once it finished. */
+  outcomes: WorkOutcome[];
 }
 
 // DASHBOARD_EVENTS_DIR / DASHBOARD_EVENTS_PATH were module-load consts that no

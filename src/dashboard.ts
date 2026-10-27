@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from './utils/logger.js';
 import { ensureDir } from './utils/fs.js';
-import { readEvents, rebuildSessions, appendEvent, memberEvents, sessionRuns } from './dashboard-collector.js';
+import { dataHomeKey, readEvents, readSessionOutcomes, rebuildSessions, appendEvent, memberEvents, sessionRuns } from './dashboard-collector.js';
 import { isProcessAlive } from './pid-monitor.js';
 import {
   DASHBOARD_DEFAULT_PORT,
   DASHBOARD_PID_CHECK_INTERVAL_MS,
   type DashboardEvent,
+  getDataHome,
   type LocalConfig,
   type RunModeSplit,
 } from './types.js';
@@ -18,6 +19,7 @@ import { getUserHome } from './utils/home.js';
 import type { VizSummary } from './viz.js';
 import { aggregateDailySessions, computeDailyStatsDelta, summarizeTrendWindow, summarizeSessionCosts } from './session-trends.js';
 import { HttpError, isLocalWrite, readJsonBody } from './dashboard/http.js';
+import { SessionOutcomes } from './session-outcomes.js';
 import type { ReportedHistory } from './dashboard/workflow-runs.js';
 
 // ─── Dashboard server architecture ──────────────────────
@@ -87,13 +89,13 @@ export async function startDashboard(port?: number): Promise<void> {
   const pushSessions = async () => {
     pushedStamp = await eventsStamp();
     try {
-      const events = await readEvents(eventsPath);
+      const [events, outcomes] = await Promise.all([readEvents(eventsPath), readSessionOutcomes(eventsPath)]);
       const workspaces = await getWorkspaces(events);
-      const sessions = rebuildSessions(events);
+      const sessions = rebuildSessions(events, outcomes);
       const data = JSON.stringify(sessions);
       for (const client of clients) {
         const workspace = workspaces.find(w => w.id === clientScopes.get(client));
-        client.write(`data: ${workspace ? JSON.stringify(rebuildSessions(workspaceEvents(events, workspace, workspaces))) : data}\n\n`);
+        client.write(`data: ${workspace ? JSON.stringify(rebuildSessions(workspaceEvents(events, workspace, workspaces), outcomes)) : data}\n\n`);
       }
     } catch (e) {
       log.debug(`dashboard: SSE push error: ${(e as Error).message}`);
@@ -372,13 +374,27 @@ export async function startDashboard(port?: number): Promise<void> {
     if (url.pathname === '/api/sessions') {
       // Return current sessions as JSON
       try {
-        const events = await scopedEvents(scopeId);
-        const sessions = rebuildSessions(events);
+        const [events, outcomes] = await Promise.all([scopedEvents(scopeId), readSessionOutcomes(eventsPath)]);
+        const sessions = rebuildSessions(events, outcomes);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(sessions));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: (e as Error).message }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/outcomes') {
+      try {
+        // A scope's sessions are those its report counted; an unassigned session is in no scope's report.
+        const key = workspace?.config ? await dataHomeKey(getDataHome(workspace.config)) : undefined;
+        const events = workspace && !key ? [] : await readSessionOutcomes(eventsPath);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(SessionOutcomes.summarize(events, { ...(key ? { dataHomeKey: key } : {}), now: Date.now() })));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
       }
       return;
     }
@@ -592,8 +608,8 @@ export async function startDashboard(port?: number): Promise<void> {
 
       // Send initial state immediately
       try {
-        const events = await scopedEvents(scopeId);
-        const sessions = rebuildSessions(events);
+        const [events, outcomes] = await Promise.all([scopedEvents(scopeId), readSessionOutcomes(eventsPath)]);
+        const sessions = rebuildSessions(events, outcomes);
         res.write(`data: ${JSON.stringify(sessions)}\n\n`);
       } catch {
         // Ignore initial send errors

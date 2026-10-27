@@ -27,6 +27,8 @@ teamai contribute --file /tmp/session.md --namespace payments
 
 `--namespace` must be a learnings namespace this scope's projects declare in `manifest/projects.yaml`, or its roles in `manifest/roles.yaml`. `--namespace ""` writes to the shared root `learnings/`.
 
+[The usage report](reporting.md#what-your-sessions-delivered) counts the learning as an outcome of the session it came from (`--session-id`, else the agent's session). When teamai can tell which tool ran that session, the learning also names it as `session` in its frontmatter.
+
 To stop the prompt, set this in `teamai.yaml`:
 
 ```yaml

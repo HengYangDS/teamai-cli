@@ -10,6 +10,7 @@ import {
   countInterventions,
   appendEvent,
   readEvents,
+  readSessionOutcomes,
   rebuildSessions,
   aggregateSessionInterventions,
   aggregateSessionMetrics,
@@ -1735,6 +1736,21 @@ describe('rebuildSessions', () => {
     expect(sessions[0].cwd).toBe('/proj');
   });
 
+  it('folds in what each session delivered so far, each outcome once (#1387)', () => {
+    const events: DashboardEvent[] = [
+      { type: 'session_start', timestamp: now, sessionId: 's1', tool: 'claude', cwd: '/proj' },
+      { type: 'session_start', timestamp: now, sessionId: 's2', tool: 'codex', cwd: '/proj' },
+    ];
+    const learning = { kind: 'learning' as const, id: 'k8s/pod-startup-timeouts-2026-10-24-k3x9q2' };
+    const commit = { kind: 'commit' as const, sha: 'c'.repeat(40) };
+    const sessions = rebuildSessions(events, [
+      { type: 'session_outcome', timestamp: now, sessionId: 's1', outcomes: [learning] },
+      { type: 'session_outcome', timestamp: now, sessionId: 's1', outcomes: [commit, learning], counted: { tokens: { input: 1, output: 1 }, interventions: 0 } },
+      { type: 'session_outcome', timestamp: now, sessionId: 'gone', outcomes: [commit] },
+    ]);
+    expect(sessions.map((s) => [s.sessionId, s.outcomes])).toEqual([['s1', [learning, commit]], ['s2', []]]);
+  });
+
   it('updates session on tool_use', () => {
     const events: DashboardEvent[] = [
       { type: 'session_start', timestamp: now, sessionId: 's1', tool: 'claude', cwd: '/proj' },
@@ -2234,6 +2250,36 @@ describe('aggregateSessionInterventions', () => {
 // ─── compactEvents ──────────────────────────────────────
 
 describe('compactEvents', () => {
+  it('keeps a session\'s outcomes for 30 days after its own events are compacted away, as they were written (#1387)', async () => {
+    const eventsPath = path.join(tmpDir, '.teamai', 'dashboard', 'events.jsonl');
+    fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+    const outcome = (sessionId: string, days: number) => JSON.stringify({ type: 'session_outcome', timestamp: daysAgo(days), sessionId, tool: 'claude', outcomes: [{ kind: 'learning', id: `${sessionId}-notes` }], pendingId: `p-${sessionId}` });
+    const filler = JSON.stringify({ type: 'session_end', timestamp: daysAgo(1), sessionId: 'filler', tool: 'claude' });
+    const recent = outcome('recent', 2);
+    fs.writeFileSync(eventsPath, [
+      JSON.stringify({ type: 'stop', timestamp: daysAgo(2), sessionId: 'recent', tool: 'claude' }), recent, outcome('old', 31),
+      ...Array.from({ length: 5_000 }, () => filler),
+    ].join('\n') + '\n');
+
+    await compactEvents(eventsPath);
+
+    expect(fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean)).toEqual([recent]);
+  });
+
+  it('keeps session outcomes out of what every other reader of the log reads (#1387)', async () => {
+    const eventsPath = path.join(tmpDir, '.teamai', 'dashboard', 'events.jsonl');
+    fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(eventsPath, [
+      JSON.stringify({ type: 'stop', timestamp: now, sessionId: 's1', tool: 'claude' }),
+      JSON.stringify({ type: 'session_outcome', timestamp: now, sessionId: 's1', tool: 'claude', outcomes: [{ kind: 'learning', id: 'notes' }] }),
+    ].join('\n') + '\n');
+
+    expect((await readEvents(eventsPath)).map((event) => event.type)).toEqual(['stop']);
+    expect((await readSessionOutcomes(eventsPath)).map((event) => event.sessionId)).toEqual(['s1']);
+  });
+
   it('does not compact when below threshold', async () => {
     const eventsPath = path.join(tmpDir, '.teamai', 'dashboard', 'events.jsonl');
     fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
@@ -2852,6 +2898,57 @@ describe('dashboard-report records the git state a session started on', () => {
     tmpDir = fs.realpathSync.native(tmpDir);
     configureUserScope();
   });
+
+  it('records on a Stop the commit the checkout is at then, so the session\'s commits are known without git (#1387)', async () => {
+    const { repo } = committedRepo();
+    fs.writeFileSync(path.join(repo, 'tracked.txt'), 'two\n');
+    git(repo, 'commit', '-q', '-am', 'during the session');
+    const head = git(repo, 'rev-parse', 'HEAD');
+
+    await runHook({ hook_event_name: 'Stop', session_id: 'git-stop', cwd: repo });
+
+    const [stop] = await readEvents();
+    expect(stop.type).toBe('stop');
+    expect(stop.gitHead).toBe(head);
+  });
+
+  it('records on a Stop the branch the checkout is on, for the pull request lookup once the session is finished (#1387)', async () => {
+    const { repo } = committedRepo();
+    git(repo, 'checkout', '-q', '-b', 'fix-retry');
+
+    await runHook({ hook_event_name: 'Stop', session_id: 'git-branch', cwd: repo });
+
+    const [stop] = await readEvents();
+    expect(stop.gitBranch).toBe('fix-retry');
+  });
+
+  it('writes a Stop without its head, in time, when git outlives its time cap with a child holding the pipe (#1387)', async () => {
+    const { repo } = committedRepo();
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).stdout.trim();
+    const wrapperDir = path.join(tmpDir, 'git-wrapper');
+    fs.mkdirSync(wrapperDir);
+    // Hangs on the two reads a Stop makes, and leaves a child that holds the pipe once it is killed.
+    fs.writeFileSync(path.join(wrapperDir, 'git'), [
+      '#!/bin/sh',
+      'case "$*" in *"rev-parse --verify"*|*"symbolic-ref --quiet"*) (sleep 12) & sleep 12 ;; esac',
+      `exec ${realGit} "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${wrapperDir}${path.delimiter}${originalPath ?? ''}`;
+    const started = Date.now();
+    try {
+      await runHook({ hook_event_name: 'Stop', session_id: 'git-hangs', cwd: repo });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+
+    // The Stop handler is stopped after 4.5 seconds, its event unwritten.
+    expect(Date.now() - started).toBeLessThan(4_500);
+    const [stop] = await readEvents();
+    expect(stop).toMatchObject({ type: 'stop', sessionId: 'git-hangs' });
+    expect(stop).not.toHaveProperty('gitHead');
+  }, 20_000);
 
   it('records the commit and a clean tree', async () => {
     const { repo, head } = committedRepo();
