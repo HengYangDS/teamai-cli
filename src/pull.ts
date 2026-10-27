@@ -54,6 +54,7 @@ import {
   resolveToolBaseDir,
   resolveHookScope,
   getDataHome,
+  getTeamaiHomeDir,
   getProjectSearchIndexPath,
   isRecallEnabled,
   isUsageReportEnabled,
@@ -3342,7 +3343,17 @@ export async function pull(
   unwritten.push(...await reconcileCoAuthorAllScopes(reconcileUser, reconcileProject, options, deliveryRecorder));
 
   // 3.8. Reconcile the team auto-compact threshold into each tool's own config.
-  await reconcileAutoCompact(reconcileUser ?? reconcileProject, options);
+  //      The user scope decides when there is one, also when this pull skipped
+  //      or only inherited it. A contended one is left to the next pull: handing
+  //      the decision to the project would flip the value.
+  const userScope = activeUserConfig ?? inheritedUserConfig;
+  if (userScope) {
+    if (!contended.has(userScope)) await reconcileAutoCompact(userScope, options);
+  } else if (projectMode && !inheritUserScope) {
+    await reconcileAutoCompactPastSkippedUser(reconcileProject, options);
+  } else {
+    await reconcileAutoCompact(reconcileProject, options);
+  }
 
   // 4. Auto-report usage data to all active scopes. Skill usage lives in each
   //    scope's own file (`<dataHome>/usage.jsonl`, the user scope's
@@ -4089,6 +4100,26 @@ async function scopeEnv(localConfig: LocalConfig, teamEnvs: Map<LocalConfig, Tea
   const teamEnv = await resolveTeamEnv(localConfig);
   teamEnvs.set(localConfig, teamEnv);
   return teamEnv;
+}
+
+/**
+ * The auto-compact step of a workspace pull that skipped the user scope. The
+ * user scope still decides when it is set up. Its config and clone are read
+ * under its sync lock, held for this step only; while another process holds
+ * it, the step is left to the next pull.
+ */
+async function reconcileAutoCompactPastSkippedUser(projectConfig: LocalConfig | null, options: GlobalOptions): Promise<void> {
+  if (options.dryRun) return;
+  const lock = path.join(getTeamaiHomeDir(), SYNC_LOCK_FILENAME);
+  if (!(await acquireLock(lock))) {
+    log.debug('[autocompact] skipped: another teamai process holds the user scope\'s sync lock; the next pull retries');
+    return;
+  }
+  try {
+    await reconcileAutoCompact((await loadLocalConfigForScope('user')) ?? projectConfig, options);
+  } finally {
+    await releaseLock(lock);
+  }
 }
 
 /**
