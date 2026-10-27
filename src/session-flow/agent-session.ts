@@ -70,8 +70,8 @@ export type AgentSessionCopyRequest = {
 };
 
 export type AgentSessionFindOptions = {
-  /** Redact secret-looking values; on by default. */
-  scrub?: boolean;
+  /** Redact secret-looking values, and the given `secrets` besides; on by default. */
+  scrub?: boolean | { secrets: Record<string, string> };
   /** Where the recorded tool roots come from; a run that reads many sessions passes one `toolRootsLookup()`. */
   toolRootsFor?: ToolRootsLookup;
   /** Also read the agents the session started, into `subagents`; off by default, so the session itself is unchanged. */
@@ -130,6 +130,7 @@ export type AgentSession = {
   find(ref: AgentSessionRef, options?: AgentSessionFindOptions): Promise<AgentSessionFound>;
   transcript(session: Session): AgentSessionTranscriptEntry[];
   platformForTool(tool: string): string | undefined;
+  toolsWithoutSessions(tools: readonly string[]): string[];
   toolForPlatform(platform: string): string;
 };
 
@@ -405,9 +406,10 @@ async function find(
   if ('code' in session) return { status: 'failed', failure: session };
   const agents = subagents ? { subagents: await readSubagents(source, session, ref) } : {};
   if (!scrub) return { status: 'done', session, ...agents };
-  const scrubbed = scrubSession(session);
+  const secrets = scrub === true ? {} : scrub.secrets;
+  const scrubbed = scrubSession(session, { secrets });
   if (agents.subagents?.status !== 'read') return { status: 'done', session: scrubbed.session, redactedCount: scrubbed.redactedCount, ...agents };
-  const read = agents.subagents.agents.map((agent) => ({ agent, scrubbed: scrubSession(agent.session) }));
+  const read = agents.subagents.agents.map((agent) => ({ agent, scrubbed: scrubSession(agent.session, { secrets }) }));
   return {
     status: 'done',
     session: scrubbed.session,
@@ -525,9 +527,17 @@ function platformForTool(tool: string): string | undefined {
   return sessionPlatformsOf(tool)[0] ?? (isSessionPlatform(tool) ? tool : undefined);
 }
 
+/** The tools of `tools` teamai reads no sessions from, in their order: their sessions are never captured, published or judged. */
+function toolsWithoutSessions(tools: readonly string[]): string[] {
+  return tools.filter((tool) => platformForTool(tool) === undefined);
+}
+
+/** One string per session, for a set or a map keyed by session. */
+export const sessionKey = ({ platform, sessionId }: Pick<AgentSessionRef, 'platform' | 'sessionId'>): string => `${platform}\0${sessionId}`;
+
 /** The tool whose sessions `platform` holds, the reverse of `platformForTool`. */
 function toolForPlatform(platform: string): string {
   return sessionPlatformOwner(platform) ?? sessionPlatformFacts(platform)?.tool ?? platform;
 }
 
-export const AgentSession = { list, copy, find, transcript, platformForTool, toolForPlatform } as const satisfies AgentSession;
+export const AgentSession = { list, copy, find, transcript, platformForTool, toolsWithoutSessions, toolForPlatform } as const satisfies AgentSession;

@@ -11,6 +11,17 @@ teamai dashboard --port 8080
 
 Open `http://localhost:3721`. The sidebar is Overview, Team Execution, Workflow Runs, Scorers, Team Context, Resources, Distribution, and Team Improvement. The numbers are from this machine.
 
+## Session sharing
+
+The Overview's **Session sharing** panel says, for the selected workspace, whether its sessions are published to `teamai-reports` and scored in each [run mode](workflow.md#attended-and-unattended-runs), and why:
+
+- Each mode's publish and scoring policy, and the setting it came from, such as `the default` or `teamai.yaml sessions.publish.unattended`. `ask` acts as `off` for now.
+- The sessions captured on this machine in each mode: active, waiting for a drain, kept on this machine, waiting to be archived, and archived. A session whose file is gone is not counted. Also the step sessions of ended runs that wait to be archived.
+- What waits, and the drain to run for it. A drain finishes and publishes only the sessions of its own run mode, so on an attended machine the panel names `TEAMAI_MODE=unattended teamai score --drain` for unattended sessions, or `$env:TEAMAI_MODE='unattended'; teamai score --drain` on Windows.
+- The archive, `daily_limit`, the scorers that judge sessions, the enabled tools teamai reads no sessions from, and the settings problems `teamai doctor` reports.
+
+**This machine** is the run mode of the shell that started `teamai dashboard`. The panel shows counts and setting names, never a session's text, and changes no setting. The settings are in [Sessions](sharing.md#sessions) and [Finished sessions](scorers.md#finished-sessions).
+
 ## Workflow Runs
 
 The Workflow Runs page has two lists for the selected workspace. **Local runs** are the run files on this machine, read live: status, the leased steps, the HITL requests waiting for an answer, and whether a settled run's record reached the team. **Team-reported history** is the run records on the `teamai-reports` branch, from every member. Each row shows the workflow, driver, status, named end, duration, tokens, team revision (absent when no pushed commit held the definitions; the source hash shows either way), and the delivered pull requests.
@@ -92,6 +103,7 @@ teamai session migrate <sessionId> -s codebuddy-ide -t claude-code
 teamai session migrate --all -s codebuddy -t claude-code   # --limit caps it
 teamai session rollback <id> --platform claude-code
 teamai session push --source codebuddy                     # --all: every workspace
+teamai session push --session <id> --source claude-code    # exactly that session, scrubbed
 teamai session pull
 teamai session list                                        # --all: every project
 teamai session search <query>
@@ -102,10 +114,12 @@ A migration never overwrites. If the target workspace already has a copy of the 
 
 For a script, `migrate <sessionId> -s <tool> -t <tool> --json` prints one line on stdout, the same `{ "data": ... }` or `{ "error": { "code", "message" } }` shape as `teamai workflow`; progress goes to stderr. `data` has the target `sessionId`, `cwd`, `reused`, and the `fidelity` report. `error.code` names the failure, such as `no_adapter` (unknown tool), `tool_unavailable` (the source or target tool is not installed, or its CLI cannot run), `not_found`, or `unreadable`, and the exit code is 1. `--json` never prompts: a missing id, `-s`, or `-t` fails with `prompt_refused`, and `--push` needs `-y` or `--scrub`.
 
-`--dry-run` previews. `--scrub` redacts before an archive; without it, an interactive run asks and a script needs `-y`. `--all` confirms above 10 sessions (push: 5). Archives go to `sessions/repos/<repo>/<author>/` under the session's own git remote, or `_unattributed`. A session that a workflow step ran in its own worktree goes under the repository of the checkout that the worktree came from.
+`--dry-run` previews. `--scrub` redacts before an archive; without it, an interactive run asks and a script needs `-y`. `--all` confirms above 10 sessions (push: 5). `push --session <id>` pushes exactly that session of `--source`, from any workspace, always scrubbed and without a prompt. Archives go to `sessions/repos/<repo>/<author>/` on the team repo's `teamai-reports` branch, under the session's own git remote, or `_unattributed`. A session that a workflow step ran in its own worktree goes under the repository of the checkout that the worktree came from.
 
 Session commands use the team repo clone of this project's install, else of the user install, so you need `--repo-root` only to point at another clone. With no install, they print `teamai is not set up for this directory.`, name `teamai init` and `--repo-root`, and exit 1.
 
-When this repo is the team repo, archives live on the `teamai-reports` branch. While another teamai command writes that branch, `session push`, `session migrate --push`, and `session pull` print `Error: Another teamai command is writing teamai-reports` and exit 1 without changing the branch. `migrate --push` keeps the copy it made. Run the command again once the other one has finished.
+Sessions archived on the default branch by an older teamai stay readable there. `session list`, `search` and `pull` read both places, `teamai-reports` first, and list a session in both once. `session resume` reads `teamai-reports`, then the old archive. teamai 0.28.0 and earlier read only the default branch, so upgrade every member to see the sessions teammates archive on `teamai-reports`. An unattended job archives its own sessions with `teamai score --drain` ([Sessions](sharing.md#sessions)).
+
+While another teamai command writes `teamai-reports`, `session push`, `session migrate --push`, and `session pull` print `Error: Another teamai command is writing teamai-reports` and exit 1 without changing the branch. `migrate --push` keeps the copy it made. Run the command again once the other one has finished.
 
 On one machine, `session push`, `migrate --push`, and `session pull` serialize archive changes through Git publication. A second command waits up to ten seconds, then reports the lock and asks you to retry. A failed archive write removes its new pair or restores the previous transcript and metadata before returning an error; a retry reuses the session name. If rollback itself fails, the error names the retained backups for recovery.

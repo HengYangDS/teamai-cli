@@ -1,13 +1,15 @@
 /**
  * A finished agent session as judge work (#1178, #1179). One redacted read gives the evidence of every judge call and
  * the context its labels carry, so `teamai score --session` and a session judge lease build both alike. A session
- * captured in a scope is judge work there once nothing happened in it for six hours, for each scorer that sets
- * `sessions: true`; the lease machinery (`workflow/scoring.ts`) hands it out and settles it.
+ * captured in a scope is judge work there once it is finished, for each scorer that sets `sessions: true`: an attended
+ * one once nothing happened in it for six hours, an unattended one once `teamai score --drain` reached it. The lease
+ * machinery (`workflow/scoring.ts`) hands it out and settles it.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { knownSecrets } from '../env-resolution.js';
+import { RUN_MODES, type RunMode } from '../launch-context.js';
 import { AttemptStore, type AttemptRecord } from '../scorers/attempts.js';
 import { batchesScorers } from '../scorers/batch.js';
 import { cachedScorerNames, pinScorers, scorerNamespaces } from '../scorers/cache.js';
@@ -25,7 +27,7 @@ import { typedIn, usedSkills } from '../skill-use.js';
 import { getDataHome, type LocalConfig } from '../types.js';
 import { readWorkspaceChildren } from '../workspace-children.js';
 import { redact } from '../utils/redact.js';
-import { AgentSession } from './agent-session.js';
+import { AgentSession, sessionKey } from './agent-session.js';
 import type { SubagentsRead } from './adapters/base.js';
 import { SessionCaptures, type CapturedSession, type SessionCapture } from './captures.js';
 import type { Session } from './ir.js';
@@ -150,7 +152,7 @@ export function sessionLabel(verdict: Omit<SessionLabel, 'source' | 'subject' | 
   return { scorer, rubric, label, score, passed, source: 'session', subject, ...(context.agent ? { agent: context.agent } : {}), used: context.used, judge, ...(context.runMode ? { runMode: context.runMode } : {}), scoredAt };
 }
 
-/** Nothing happened in a session for this long: it is finished, and judge work. */
+/** Nothing happened in an attended session for this long: it is finished, and judge work. */
 export const FINISHED_AFTER_MS = 6 * 60 * 60 * 1000;
 
 /** One sampled (scorer, finished session) of this scope with its derived state. */
@@ -233,7 +235,7 @@ async function lastEvents(): Promise<Map<string, string>> {
   for (const event of await readEvents()) {
     const platform = AgentSession.platformForTool(event.tool);
     if (!platform) continue;
-    const key = sessionKey(platform, event.sessionId);
+    const key = sessionKey({ platform, sessionId: event.sessionId });
     if ((latest.get(key) ?? '') < event.timestamp) latest.set(key, event.timestamp);
   }
   return latest;
@@ -248,47 +250,74 @@ async function lastActiveAt(captured: CapturedSession, events: ReadonlyMap<strin
   const written = await Promise.all(files.map((file) => fs.stat(file).then((stat) => stat.mtimeMs, () => undefined)));
   const known = written.filter((at): at is number => at !== undefined);
   if (known.length < files.length) return undefined;
-  const event = events.get(sessionKey(captured.platform, captured.sessionId));
+  const event = events.get(sessionKey(captured));
   return Math.max(...known, ...(event ? [Date.parse(event)] : []), ...captured.captures.map((capture) => Date.parse(capture.capturedAt)));
 }
 
-const sessionKey = (platform: string, sessionId: string) => `${platform}\0${sessionId}`;
+/** Whether a file the hooks of `captured` named is gone, so it is never finished, judged or published. */
+async function isGone(captured: CapturedSession): Promise<boolean> {
+  return await lastActiveAt(captured, new Map()) === undefined;
+}
+
+/**
+ * The sessions of `captured` finished at `now`, oldest activity first, of the run modes `includes` keeps (a capture with
+ * no mode counts as attended): an attended session once nothing happened in it for six hours, an unattended one once a
+ * drain reached it (#1385). A session whose file is gone is never finished.
+ */
+async function finished(captured: readonly CapturedSession[], now: string, includes: (mode: RunMode) => boolean): Promise<CapturedSession[]> {
+  const events = await lastEvents();
+  const found: Array<{ captured: CapturedSession; activeAt: number }> = [];
+  for (const one of captured) {
+    const mode = SessionCaptures.runModeOf(one.captures) ?? 'attended';
+    if (!includes(mode)) continue;
+    const activeAt = await lastActiveAt(one, events);
+    if (activeAt === undefined) continue;
+    switch (mode) {
+      case 'attended':
+        if (activeAt + FINISHED_AFTER_MS <= Date.parse(now)) found.push({ captured: one, activeAt });
+        break;
+      case 'unattended':
+        if (one.drained) found.push({ captured: one, activeAt });
+        break;
+      default: {
+        const unhandled: never = mode;
+        return unhandled;
+      }
+    }
+  }
+  return found.sort((left, right) => left.activeAt - right.activeAt).map((one) => one.captured);
+}
 
 /** Every session captured here by `platform\0sessionId`, while a session attempt is kept here to prune by it; else none. */
 async function prunableBy(config: LocalConfig): Promise<ReadonlySet<string> | undefined> {
   const attempts = [...(await AttemptStore.read(config)).values()].flat();
   if (!attempts.some((attempt) => attempt.source === 'session')) return undefined;
-  return new Set((await SessionCaptures.list(config)).map((one) => sessionKey(one.platform, one.sessionId)));
+  return new Set((await SessionCaptures.list(config)).map(sessionKey));
 }
 
 /**
  * The session entries of this scope, oldest activity first: each finished session captured here, for each scorer of
- * the scope that judges sessions and samples it, and every session captured here by `platform\0sessionId`. None while
- * the scope does not turn session scoring on or no scorer judges sessions; `captured` is then listed only while
- * session attempts are kept, so they are pruned after the team or the member turned it off.
+ * the scope that judges sessions and samples it, while the policy of the run mode it was captured in is `auto` (a
+ * capture with no mode counts as attended), and every session captured here by `platform\0sessionId`. None while no
+ * mode's policy is `auto` or no scorer judges sessions; `captured` is then listed only while session attempts are kept,
+ * so they are pruned after the team or the member turned it off.
  */
 async function entries(config: LocalConfig, now: string, scoring: Extract<ScopeScoring, { ok: true }>): Promise<{ entries: SessionEntry[]; captured?: ReadonlySet<string> }> {
-  if (!scoring.sessions.enabled) return { entries: [], captured: await prunableBy(config) };
+  const { policies } = scoring.sessions;
+  if (!RUN_MODES.some((mode) => policies[mode].policy === 'auto')) return { entries: [], captured: await prunableBy(config) };
   const scorers = await sessionScorers(config);
   if (scorers.length === 0) return { entries: [], captured: await prunableBy(config) };
   const captured = await SessionCaptures.list(config);
-  const keys = new Set(captured.map((one) => sessionKey(one.platform, one.sessionId)));
+  const keys = new Set(captured.map(sessionKey));
   if (captured.length === 0) return { entries: [], captured: keys };
-  const events = await lastEvents();
-  const finished: Array<{ captured: CapturedSession; activeAt: number }> = [];
-  for (const one of captured) {
-    const activeAt = await lastActiveAt(one, events);
-    if (activeAt !== undefined && activeAt + FINISHED_AFTER_MS <= Date.parse(now)) finished.push({ captured: one, activeAt });
-  }
-  finished.sort((left, right) => left.activeAt - right.activeAt);
   const [labels, attempts] = await Promise.all([LabelStore.local(config), AttemptStore.read(config)]);
   const batch = batchesScorers({ team: scoring.batch });
   const dirs = [...new Set(scorers.flatMap(({ namespace }) => namespace ?? []))];
   const scope = dirs.length > 0 ? await readWorkspaceChildren(config) : config;
   const sessions: Array<{ platform: string; sessionId: string; scorers: SessionScorer[] }> = [];
-  for (const { captured } of finished) {
-    const active = dirs.length > 0 ? await sessionNamespaces(scope, captured.captures, dirs) : new Set<string>();
-    sessions.push({ ...captured, scorers: scorers.filter(({ namespace }) => namespace === undefined || active.has(namespace)) });
+  for (const { platform, sessionId, captures } of await finished(captured, now, (mode) => policies[mode].policy === 'auto')) {
+    const active = dirs.length > 0 ? await sessionNamespaces(scope, captures, dirs) : new Set<string>();
+    sessions.push({ platform, sessionId, scorers: scorers.filter(({ namespace }) => namespace === undefined || active.has(namespace)) });
   }
   const found = sessions.flatMap(({ platform, sessionId, scorers: applying }) => applying.flatMap(({ scorer, pin, definition }): SessionEntry[] => {
     const subject = { platform, sessionId };
@@ -341,7 +370,7 @@ function launchesToday(attempts: Iterable<AttemptRecord>, now: string): number {
 function gone(attempts: ReadonlyMap<string, readonly AttemptRecord[]>, captured: ReadonlySet<string>, now: string): string[] {
   const today = localDay(now);
   return [...attempts].filter(([, ofEntry]) => ofEntry.length > 0 && ofEntry.every((attempt) => attempt.source === 'session'
-    && !captured.has(sessionKey(attempt.subject.platform, attempt.subject.sessionId))
+    && !captured.has(sessionKey(attempt.subject))
     && localDay(attempt.leasedAt) !== today
     && !(attempt.status === 'leased' && !hasLapsed(attempt, now)))).map(([entry]) => entry);
 }
@@ -376,4 +405,4 @@ function leaseCwd(config: LocalConfig): string {
   return config.scope === 'project' && config.projectRoot ? config.projectRoot : getDataHome(config);
 }
 
-export const SessionWork = { entries, entriesOf, isLabelled, launchesToday, gone, read, ensureEvidence, leaseCwd } as const;
+export const SessionWork = { entries, entriesOf, finished, isLabelled, launchesToday, gone, read, ensureEvidence, leaseCwd, sessionScorers, isGone } as const;

@@ -1,4 +1,5 @@
 import { autoDetectInit, loadLocalConfigForScope } from './config.js';
+import { resolveRunMode } from './launch-context.js';
 import { AttemptStore, isRunAttempt } from './scorers/attempts.js';
 import { isScorerFile } from './scorers/definition.js';
 import { parseLeaseRef } from './scorers/entry.js';
@@ -25,6 +26,7 @@ export interface ScoreOptions {
   session?: string;
   source?: string;
   push?: boolean;
+  drain?: boolean;
 }
 
 function writeEnvelope(envelope: WorkflowEnvelope): void {
@@ -129,6 +131,7 @@ async function leaseConfig(ref: string): Promise<{ ok: true; config: LocalConfig
 }
 
 async function score(options: ScoreOptions): Promise<WorkflowEnvelope> {
+  if (options.drain) return failure('invalid_arguments', '--drain goes alone and takes no payload: teamai score --drain');
   const asksForPass = options.run !== undefined || options.step !== undefined || options.pass !== undefined || options.queue;
   const asksForSession = options.session !== undefined || options.source !== undefined || (!asksForPass && (options.scorer?.length || options.batch));
   if (asksForPass && (options.session !== undefined || options.source !== undefined)) return failure('invalid_arguments', 'Pass --run to judge a workflow pass or --session to judge a session, not both');
@@ -186,8 +189,21 @@ async function score(options: ScoreOptions): Promise<WorkflowEnvelope> {
   return submitJudgeLease(config, options.lease ?? '', submission);
 }
 
-/** `teamai score`: judge work for any driver. Prints one JSON envelope. */
+/** `teamai score --drain`: drains every scope this directory reaches, in this run mode, and prints what it did. */
+async function drainHere(): Promise<void> {
+  const [{ Drain }, { reachedScopes }] = await Promise.all([import('./score-drain.js'), import('./score-sessions.js')]);
+  const drained = await Drain.run(await reachedScopes(process.cwd()), { mode: resolveRunMode(process.env) });
+  Drain.print(drained);
+  if (Drain.hasFailed(drained)) process.exitCode = 1;
+}
+
+/** `teamai score`: judge work for any driver. Prints one JSON envelope, or with `--drain` the lines of what it did. */
 export async function scoreCommand(options: ScoreOptions): Promise<void> {
+  const { drain, scorer = [], ...others } = options;
+  if (drain && scorer.length === 0 && Object.values(others).every((value) => value === undefined || value === false)) {
+    await drainHere();
+    return;
+  }
   setStderrOnly(true);
   writeEnvelope(await score(options));
 }

@@ -553,10 +553,18 @@ export class CheckoutRefusedError extends Error {
   }
 }
 
-/** The reason a failed side-branch write reports: short for a refusal that was warned, whole otherwise. */
+/** The lines of git's output that report its progress. Every other line, such as the cause ssh prints, says what went wrong. */
+const GIT_PROGRESS_LINE = /^(?:To |Pushing to |hint:|Enumerating |Counting |Delta |Compressing |Writing |Total |Done$|remote:$|remote: (?:Enumerating|Counting|Compressing|Resolving|Total))/;
+
+/**
+ * The reason a failed side-branch write reports: short for a refusal that was warned, else its lines but git's
+ * progress, on one line. A caller ends the sentence, so the reason has no final period.
+ */
 export function failureReason(e: unknown): string {
   if (e instanceof CheckoutRefusedError && warnedRefusals.has(e.message)) return e.summary;
-  return e instanceof Error ? e.message : String(e);
+  const message = e instanceof Error ? e.message : String(e);
+  const problems = message.split('\n').map((line) => line.trim().replace(/\s+/g, ' ')).filter((line) => line !== '' && !GIT_PROGRESS_LINE.test(line));
+  return problems.length > 0 ? problems.join('; ').replace(/\.$/, '') : message;
 }
 
 /** A failed write; `refused` when a checkout refusal stopped it, which every retry meets until the member acts. */
@@ -796,7 +804,7 @@ async function commitAndPushAt(
       const stalled = pushErr instanceof GitPluginError && pushErr.plugin === 'timeout';
       if (attempt === maxRetries || stalled) {
         log.debug(`[${spec.logTag}] push failed after ${attempt} attempts: ${(pushErr as Error).message}`);
-        return { status: 'failed', reason: (pushErr as Error).message };
+        return { status: 'failed', reason: failureReason(pushErr) };
       }
       // The commit took only `files`: anything else staged or modified would
       // make git refuse to rebase, on this attempt and every later one.

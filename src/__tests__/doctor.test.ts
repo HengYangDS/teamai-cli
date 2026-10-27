@@ -716,6 +716,48 @@ describe('doctor — JSON report', () => {
         expect(emittedReport().notes).toContain('Usage reporting: off, from HTTP mode (no team repo to report to).');
     });
 
+    it('notes a sessions.publish value it ignores', async () => {
+        mockedLoadTeamConfig.mockResolvedValue({ ...mockTeamConfig, sessions: { publish: { unattended: 'yes' } } });
+
+        await doctor({ json: true });
+
+        expect(emittedReport().notes).toContain('teamai.yaml sessions.publish.unattended is "yes", not off, ask or auto, so it is ignored.');
+    });
+
+    it('notes that sessions are not published for an HTTP team repo', async () => {
+        mockedLoadLocalConfig.mockResolvedValue({ ...mockLocalConfig, repo: { ...mockLocalConfig.repo, kind: 'http' } });
+
+        await doctor({ json: true });
+
+        expect(emittedReport().notes).toContain('Sessions are not published: the team repo is an HTTP repo, which keeps no session archive, so sessions.publish acts as off.');
+    });
+
+    it('names the enabled tools teamai reads no sessions from in one line per mode whose sessions are published or scored, ask counting as off', async () => {
+        mockedLoadTeamConfig.mockResolvedValue({
+            ...mockTeamConfig,
+            toolPaths: { ...mockTeamConfig.toolPaths, muse: { skills: '.config/muse/skills' }, lyre: { skills: '.config/lyre/skills' } },
+        });
+
+        await doctor({ json: true });
+
+        expect(emittedReport().notes?.filter((note) => note.includes('reads no sessions from'))).toEqual([
+            'Sessions are published and scored in unattended mode, but teamai reads no sessions from muse, lyre: they are neither published nor judged.',
+        ]);
+    });
+
+    it('names no tool teamai reads no sessions from while sessions are neither published nor scored', async () => {
+        mockedLoadLocalConfig.mockResolvedValue({ ...mockLocalConfig, scoring: { sessions: false } });
+        mockedLoadTeamConfig.mockResolvedValue({
+            ...mockTeamConfig,
+            toolPaths: { ...mockTeamConfig.toolPaths, muse: { skills: '.config/muse/skills' } },
+            sessions: { publish: { attended: 'off', unattended: 'off' } },
+        });
+
+        await doctor({ json: true });
+
+        expect(emittedReport().notes?.filter((note) => note.includes('reads no sessions from'))).toEqual([]);
+    });
+
     it.each([
         [{ CI: 'true' }, { mode: 'unattended', source: 'CI' }],
         [{ CI: 'true', TEAMAI_MODE: 'attended' }, { mode: 'attended', source: 'TEAMAI_MODE' }],
