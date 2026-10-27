@@ -1,10 +1,11 @@
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import fs from 'fs-extra';
 import { z } from 'zod';
 
-import { extractCodebase } from './codebase-extract.js';
+import { extractCodebase, sourceRepositoryMetadata } from './codebase-extract.js';
 import type { TeamaiInit } from './config.js';
 import { log } from './utils/logger.js';
 import { remotesMatch } from './utils/git.js';
@@ -105,6 +106,11 @@ async function readCodebaseSource(evidenceDir: string): Promise<CodebaseSource |
   return parsed.success ? parsed.data : null;
 }
 
+/** Two checkouts without a remote are one source when they hashed the same root and extracted the same directory in it. */
+function sameLocalSource(a: { localRootHash: string; sourceSubdir?: string }, b: { localRootHash: string; sourceSubdir?: string }): boolean {
+  return a.localRootHash === b.localRootHash && (a.sourceSubdir ?? '') === (b.sourceSubdir ?? '');
+}
+
 /** Whether the published evidence of a slug came from the source being imported over it. */
 type PublishedSource =
   | { kind: 'same' }
@@ -120,26 +126,31 @@ type PublishedSource =
  * published manifest names a repository or the two differ. Two checkouts with
  * no remote are the same source when they hashed the same root and extracted
  * the same directory in it; otherwise nothing is known, since a checkout moved
- * to another path hashes differently. Teamwikis written before the
- * per-codebase `source-manifest.json` existed have no published identity;
+ * to another path hashes differently. Evidence with this checkout's own hashed
+ * root and directory is its own even after the checkout gained a remote.
+ * Teamwikis written before the per-codebase `source-manifest.json` existed have no published identity;
  * there a provider-namespaced slug (`gitlab__group__repo`) still names the
  * remote repository, so the slug itself is the identity. A bare `--dir`
  * basename is not, and nothing is known.
  */
-async function publishedSource(dirs: { publishedDir: string; stagedDir: string; slug: string }): Promise<PublishedSource> {
+async function publishedSource(dirs: {
+  publishedDir: string;
+  stagedDir: string;
+  slug: string;
+  /** The checkout being imported, whose hashed root is read whether or not it has a remote. */
+  sourceDir: string;
+}): Promise<PublishedSource> {
   const [published, staged] = await Promise.all([readCodebaseSource(dirs.publishedDir), readCodebaseSource(dirs.stagedDir)]);
+  if (published?.kind === 'local' && sameLocalSource(published, await sourceRepositoryMetadata(dirs.sourceDir))) {
+    return { kind: 'same' };
+  }
   if (published?.kind === 'remote') {
     const sameRepo = staged?.kind === 'remote' && remotesMatch(published.repoUrl, staged.repoUrl);
     const sameDir = published.sourceSubdir === undefined || staged?.sourceSubdir === undefined
       || published.sourceSubdir === staged.sourceSubdir;
     return sameRepo && sameDir ? { kind: 'same' } : { kind: 'different', published, staged };
   }
-  if (published?.kind === 'local' && staged?.kind === 'local') {
-    return published.localRootHash === staged.localRootHash
-      && (published.sourceSubdir ?? '') === (staged.sourceSubdir ?? '')
-      ? { kind: 'same' }
-      : { kind: 'unknown' };
-  }
+  if (published?.kind === 'local' && staged?.kind === 'local') return { kind: 'unknown' };
   return staged?.kind === 'remote' && PROVIDER_SLUG_PREFIXES.some((prefix) => dirs.slug.startsWith(prefix))
     ? { kind: 'same' }
     : { kind: 'unknown' };
@@ -158,6 +169,97 @@ function differentSourceError(slug: string, source: { published: RemoteSource; s
     : `${evidence} holds the evidence of ${published}, and this checkout has no origin remote. Not replacing it. `
       + 'If this checkout is that repository, add its origin remote back and import it again; '
       + `otherwise import it from a directory with another name, or remove ${evidence} if that codebase is gone.`);
+}
+
+/**
+ * A `--dir` checkout without an origin remote is named after its directory, so
+ * `/a/svc` and `/b/svc` share the slug `svc` and the second import would
+ * replace the first's evidence (#1422). Decided once, before anything is
+ * seeded or extracted, so the import prints the slug it publishes under.
+ *
+ * Such a checkout publishes where its own evidence already is (the same hashed
+ * root and directory in it, see #1427), or at the slug when nothing is there.
+ * Over evidence that names another source, or none, it moves to
+ * `<slug>-<hash8>` of its real path, then the full digest, and never reuses a
+ * suffix that holds another source's evidence. One over a remote's evidence
+ * keeps the slug, and `publishedSource` decides whether the import may
+ * replace it. A checkout with a remote keeps its slug, or the suffix it
+ * published under before it had an origin, and is refused over the evidence
+ * of another checkout without one; evidence with its own hashed root and
+ * directory is its own from before it had an origin.
+ */
+export async function localCheckoutSlug(opts: { sourceDir: string; slug: string; wikiRoot: string }): Promise<string> {
+  const { slug, wikiRoot } = opts;
+  const source = await sourceRepositoryMetadata(opts.sourceDir);
+  if (source.repoUrl) {
+    // A subdirectory keeps its directory name once it has an origin, so a
+    // suffix it was given before is still its own: found by its hashed root
+    // on the first import, and by the repository it names after that.
+    const { repoUrl } = source;
+    const isThisSource = (codebase: CodebaseSource | null) => codebase?.kind === 'remote'
+      && remotesMatch(codebase.repoUrl, repoUrl)
+      && (codebase.sourceSubdir ?? '') === (source.sourceSubdir ?? '');
+    const published = await readCodebaseSource(path.join(wikiRoot, 'evidence', 'code', slug));
+    for (const candidate of await suffixedSlugs(opts.sourceDir, slug)) {
+      const suffixed = await readCodebaseSource(path.join(wikiRoot, 'evidence', 'code', candidate));
+      const isOwn = suffixed?.kind === 'local' ? sameLocalSource(suffixed, source) : isThisSource(suffixed);
+      if (!isOwn) continue;
+      // A release without suffixes may have imported it under its directory name since.
+      if (isThisSource(published)) {
+        log.warn(`teamwiki/evidence/code/${slug}/ is an older copy of teamwiki/evidence/code/${candidate}/. `
+          + 'Move any curated docs you want to keep from it, then remove it.');
+      }
+      return candidate;
+    }
+    const evidence = `teamwiki/evidence/code/${slug}/`;
+    if (published?.kind === 'local' && !sameLocalSource(published, source)) {
+      throw new Error(`${evidence} holds the evidence of a checkout without an origin remote, and this checkout is `
+        + `${describeSource({ kind: 'remote', repoUrl: source.repoUrl, sourceSubdir: source.sourceSubdir })}. Not replacing it. `
+        + `If it is this checkout's from before it moved, move any curated docs you want to keep from ${evidence}, `
+        + 'remove it and import again; otherwise import this checkout from a directory with another name.');
+    }
+    return slug;
+  }
+
+  const [occupant, ...suffixed] = await Promise.all([slug, ...await suffixedSlugs(opts.sourceDir, slug)]
+    .map(async (candidate) => {
+      const evidenceDir = path.join(wikiRoot, 'evidence', 'code', candidate);
+      return { slug: candidate, isEmpty: !(await fs.pathExists(evidenceDir)), source: await readCodebaseSource(evidenceDir) };
+    }));
+  const own = [occupant, ...suffixed].find((candidate) => candidate.source?.kind === 'local'
+    && sameLocalSource(candidate.source, source));
+  if (own) return own.slug;
+  if (occupant.isEmpty || occupant.source?.kind === 'remote') return slug;
+
+  const free = suffixed.find((candidate) => candidate.isEmpty);
+  if (!free) {
+    throw new Error(`teamwiki/evidence/code/${slug}/ and both of its suffixed slugs hold evidence of other sources. `
+      + 'Not replacing them. Import this checkout from a directory with another name.');
+  }
+  log.warn(`teamwiki/evidence/code/${slug}/ holds evidence that names another source, or no source, so this checkout, `
+    + `which has no origin remote, is published under teamwiki/evidence/code/${free.slug}/. `
+    + `If teamwiki/evidence/code/${slug}/ is an older copy of this checkout, move any curated docs you want to keep from it, `
+    + `remove it, and change any resources.wiki entry that means this checkout from "${slug}" to "${free.slug}".`);
+  return free.slug;
+}
+
+/** The slugs a checkout without an origin moves to when its directory name holds another source's evidence. */
+async function suffixedSlugs(sourceDir: string, slug: string): Promise<string[]> {
+  const digest = createHash('sha256').update(await fs.realpath(sourceDir)).digest('hex');
+  return [`${slug}-${digest.slice(0, 8)}`, `${slug}-${digest}`];
+}
+
+/**
+ * Where a checkout that gained an origin published before it had one: the
+ * suffixed slug `localCheckoutSlug` gave it, else its directory name (#1422).
+ */
+export async function ownLegacySlug(opts: { sourceDir: string; slug: string; wikiRoot: string }): Promise<string> {
+  const source = await sourceRepositoryMetadata(opts.sourceDir);
+  for (const candidate of await suffixedSlugs(opts.sourceDir, opts.slug)) {
+    const published = await readCodebaseSource(path.join(opts.wikiRoot, 'evidence', 'code', candidate));
+    if (published?.kind === 'local' && sameLocalSource(published, source)) return candidate;
+  }
+  return opts.slug;
 }
 
 /**
@@ -247,7 +349,7 @@ export async function importCodebase(opts: ImportCodebaseOptions): Promise<boole
     const { legacySlug } = opts;
     const legacyDest = legacySlug && legacySlug !== slug ? path.join(wikiRoot, 'evidence', 'code', legacySlug) : null;
     if (legacySlug && legacyDest && await fs.pathExists(legacyDest)) {
-      const legacy = await publishedSource({ publishedDir: legacyDest, stagedDir: stagingEvidence, slug: legacySlug });
+      const legacy = await publishedSource({ publishedDir: legacyDest, stagedDir: stagingEvidence, slug: legacySlug, sourceDir });
       switch (legacy.kind) {
         case 'same':
           if (await fs.pathExists(evidenceDest)) {
@@ -259,8 +361,8 @@ export async function importCodebase(opts: ImportCodebaseOptions): Promise<boole
           }
           break;
         case 'unknown':
-          // Evidence older than its source manifest, or from before the checkout
-          // had an origin, cannot be shown to be this repo's, so it is not moved.
+          // Evidence older than its source manifest, or another checkout's
+          // without an origin, cannot be shown to be this repo's, so it is not moved.
           log.warn(`teamwiki/evidence/code/${legacySlug}/ names no repository, so it was left in place. `
             + `If it is an older copy of teamwiki/evidence/code/${slug}/, move any curated docs you want to keep from it, then remove it.`);
           break;
@@ -288,7 +390,7 @@ export async function importCodebase(opts: ImportCodebaseOptions): Promise<boole
     // A missing manifest is the only case where nothing can be pruned.
     const hasManifest = Boolean(stagedManifest);
 
-    const source = await publishedSource({ publishedDir: evidenceDest, stagedDir: stagingEvidence, slug });
+    const source = await publishedSource({ publishedDir: evidenceDest, stagedDir: stagingEvidence, slug, sourceDir });
     switch (source.kind) {
       case 'different':
         throw differentSourceError(slug, source);

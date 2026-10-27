@@ -439,35 +439,50 @@ export async function importCmd(opts: ImportOptions): Promise<void> {
         throw new Error(`Directory not found: ${dirPath}`);
       }
       const { checkoutName, defaultProjectSlug } = await import('./codebase-extract.js');
-      const slug = await defaultProjectSlug(dirPath);
-      const legacySlug = await checkoutName(dirPath);
-      log.info(`Scanning local directory: ${dirPath} (project: ${slug})`);
+      const dirSlug = await defaultProjectSlug(dirPath);
+      const checkoutSlug = await checkoutName(dirPath);
+
+      // <output>/teamwiki, else the team repo's teamwiki/; never the source directory.
+      const { lockTeamwiki, resolveTeamwiki } = await import('./utils/teamwiki-root.js');
+      const { importLocalCheckout, localCheckoutSlug, ownLegacySlug } = await import('./import-codebase.js');
 
       if (opts.dryRun) {
+        // The slug depends on the evidence already published, so the preview reads
+        // it; a preview without a teamwiki still reports what it can.
+        const preview = await resolveTeamwiki({ output: opts.output, dryRun: true }).catch(() => undefined);
+        const slug = preview ? await localCheckoutSlug({ sourceDir: dirPath, slug: dirSlug, wikiRoot: preview.wikiRoot }) : dirSlug;
+        log.info(`Scanning local directory: ${dirPath} (project: ${slug})`);
         log.info(`[dry-run] skipping code extraction, no action taken`);
         log.success(`Local directory ${slug} import complete (dry-run)`);
         return;
       }
 
-      // <output>/teamwiki, else the team repo's teamwiki/; never the source directory.
-      const { lockTeamwiki, resolveTeamwiki } = await import('./utils/teamwiki-root.js');
       const target = await resolveTeamwiki({ output: opts.output });
       const { wikiRoot, team } = target;
       const releaseImportLock = await lockTeamwiki(target);
       try {
-        const { importLocalCheckout } = await import('./import-codebase.js');
+        const slug = await localCheckoutSlug({ sourceDir: dirPath, slug: dirSlug, wikiRoot });
+        // A checkout that gained an origin may have published under a suffix before.
+        const legacySlug = slug === dirSlug && checkoutSlug !== slug
+          ? await ownLegacySlug({ sourceDir: dirPath, slug: checkoutSlug, wikiRoot })
+          : checkoutSlug;
+        log.info(`Scanning local directory: ${dirPath} (project: ${slug})`);
         const updated = await importLocalCheckout({
           sourceDir: dirPath,
           slug,
-          legacySlug,
+          // A suffixed slug is a new codebase; the directory-named evidence is another source's.
+          ...(slug === dirSlug ? { legacySlug } : {}),
           wikiRoot,
           incremental: opts.incremental ?? false,
           skipEnrich: opts.skipEnrich ?? false,
           maxFiles,
         });
         // While the old name still holds evidence (another repo's, or a copy the
-        // import warned about), a scope on it still points at that evidence.
-        if (team && legacySlug !== slug && !(await fs.pathExists(path.join(wikiRoot, 'evidence', 'code', legacySlug)))) {
+        // import warned about), a scope on it still points at that evidence. A
+        // suffixed checkout was never published under the old name, so such a
+        // scope is not its own.
+        if (team && slug === dirSlug && legacySlug !== slug
+          && !(await fs.pathExists(path.join(wikiRoot, 'evidence', 'code', legacySlug)))) {
           await warnStaleWikiScopes({ teamRepo: team.localConfig.repo.localPath, legacySlug, slug });
         }
         if (!team) {
@@ -476,10 +491,10 @@ export async function importCmd(opts: ImportOptions): Promise<void> {
           await autoPushTeamRepo(team.localConfig.repo.localPath, `[teamai] Import from local dir: ${slug}`);
           log.success(`Pushed to team knowledge repo (${team.localConfig.repo.remote})`);
         }
+        log.success(`Local directory ${slug} import complete`);
       } finally {
         await releaseImportLock();
       }
-      log.success(`Local directory ${slug} import complete`);
     } else if (opts.fromClaude) {
       // 分支 3b：--from-claude，扫描规则文件并交互式导入
       const candidates = await scanCandidates({ fromClaude: true, dryRun: opts.dryRun });
