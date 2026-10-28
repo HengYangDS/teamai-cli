@@ -4,8 +4,8 @@ import { autoDetectInit, loadTeamConfig, machineWorkflowAllowProblem } from './c
 import { resolveWorkflowEnv, type WorkflowEnv } from './env-resolution.js';
 import { isLeaseRef } from './scorers/entry.js';
 import { log, setStderrOnly } from './utils/logger.js';
-import { collectEnvSecrets, redactJson } from './utils/redact.js';
-import { parseNextPayload, parseReport, parseResponsePayload, resumableSessions, withIgnored, type ParsedResponsePayload } from './workflow/engine.js';
+import { collectEnvSecrets, redact, redactJson } from './utils/redact.js';
+import { parseNextPayload, parseReport, parseResponsePayload, resumableSessions, retryCommand, withIgnored, type ParsedResponsePayload } from './workflow/engine.js';
 import { claimOffered, publishRun, resumeRun } from './workflow/handoff.js';
 import { PublishedRuns, type Lack, type PublishedRun, type ResumableRun, type Taker } from './workflow-published-runs.js';
 import { safeText } from './session-flow/session-cmd-shared.js';
@@ -40,13 +40,15 @@ function writeEnvelope(envelope: WorkflowEnvelope, secrets: Record<string, strin
 }
 
 /**
- * Prints what the local driver answered for a run of `config`, then, once an unattended run is done, drains the run's
+ * Prints what the local driver answered for a run of `config`, with why each step of a failed run failed, then, once an unattended run is done, drains the run's
  * scope as `teamai score --drain` does unless its unattended publishing and session scoring are both `off`. The run's
  * outcome keeps setting the exit code: what the drain could not do is printed.
  */
 async function writeDriven(config: LocalConfig, envelope: WorkflowEnvelope, secrets: Record<string, string>): Promise<void> {
   writeEnvelope(envelope, secrets);
-  if ('error' in envelope || !('done' in envelope.data) || resolveRunMode(process.env) !== 'unattended') return;
+  if ('error' in envelope || !('done' in envelope.data)) return;
+  await explainFailedSteps(config, envelope.data.done, secrets);
+  if (resolveRunMode(process.env) !== 'unattended') return;
   const { Drain } = await import('./score-drain.js');
   try {
     if (!await Drain.drainsUnattendedRun(config)) return;
@@ -54,6 +56,29 @@ async function writeDriven(config: LocalConfig, envelope: WorkflowEnvelope, secr
     Drain.print(await Drain.run([config], { mode: 'unattended' }));
   } catch (error) {
     log.error(`The drain stopped: ${error instanceof Error ? error.message : String(error)}. Run teamai score --drain to finish it.`);
+  }
+}
+
+const FailedDoneSchema = z.object({ run: z.string(), outcome: z.literal('failed') });
+
+/**
+ * On stderr, why each step of a failed run failed and the commands that retry it, since the `done` envelope carries
+ * only the outcome. A person who ran the local driver otherwise finds the reason only in the run file.
+ */
+async function explainFailedSteps(config: LocalConfig, done: unknown, secrets: Record<string, string>): Promise<void> {
+  const failed = FailedDoneSchema.safeParse(done);
+  if (!failed.success) return;
+  const { run: runId } = failed.data;
+  const run = await readRun(config, runId);
+  if (typeof run === 'string') return;
+  const failedIds = run.steps.filter((step) => step.status === 'failed').map((step) => step.id);
+  // A fan-out or workflow step fails, with no failure of its own, when a step under it fails: name that step instead.
+  const failedUnder = (id: string): boolean => failedIds.some((other) => other.startsWith(`${id}.`) || other.startsWith(`${id}[`));
+  for (const step of run.steps) {
+    if (step.status !== 'failed' || (!step.failure && failedUnder(step.id))) continue;
+    const why = step.failure ? ` with ${step.failure.code}: ${step.failure.message}` : step.message ? `: ${step.message}` : '';
+    log.error(redact(`Step "${step.id}" failed${why}`, { envSecrets: secrets, patterns: false }));
+    log.info(`Retry it with ${retryCommand(runId, step.id)}, then continue the run with teamai workflow resume ${runId}`);
   }
 }
 
