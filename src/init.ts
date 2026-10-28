@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import type { ZodTypeAny } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readWorkspaceChildren } from './workspace-children.js';
@@ -82,6 +83,46 @@ async function readConfigFile(configPath: string): Promise<LocalConfig | null> {
     log.debug(`Not carrying settings from ${configPath}: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
+}
+
+/** The settings of a config file that fails validation, key by key. */
+interface SalvagedConfig {
+  /** The keys that validate, with the recorded team repo's `remote` and `kind`; `localPath` is not read from the file. */
+  file: LocalConfig;
+  /** One line for each key that does not validate, naming the key, its value and why it was dropped. */
+  dropped: string[];
+}
+
+/**
+ * Read what a config file that fails validation still holds: the team repo it names and every
+ * key that validates on its own. One bad value then costs that value, not the member's settings
+ * (#1500). Null when the file is not a YAML mapping or records no team repo.
+ */
+async function salvageConfigFile(configPath: string): Promise<SalvagedConfig | null> {
+  let raw: unknown;
+  try {
+    raw = YAML.parse(await readFileSafe(configPath) ?? '');
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const entries = raw as Record<string, unknown>;
+  const remote = (entries.repo as { remote?: unknown } | null | undefined)?.remote;
+  if (typeof remote !== 'string') return null;
+  const fields: Record<string, ZodTypeAny | undefined> = LocalConfigSchema.shape;
+  const settings: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(entries)) {
+    const field = key === 'repo' ? undefined : fields[key];
+    if (!field) continue;
+    const parsed = field.safeParse(value);
+    if (parsed.success) settings[key] = parsed.data;
+    else dropped.push(`${key} in ${configPath} is ${JSON.stringify(value)} (${parsed.error.issues[0]?.message}), so it was dropped`);
+  }
+  const kind = LocalConfigSchema.shape.repo.shape.kind.safeParse((entries.repo as { kind?: unknown }).kind);
+  const username = typeof entries.username === 'string' ? entries.username : '';
+  const repo = { localPath: '', remote, ...(kind.success && kind.data ? { kind: kind.data } : {}) };
+  return { file: { ...settings, username, repo } as LocalConfig, dropped };
 }
 
 /**
@@ -1750,9 +1791,10 @@ export async function init(options: GlobalOptions & {
   const existingConfigPath = path.join(teamaiHome, 'config.yaml');
   // The settings this re-init carries forward: the live config's, or, when an
   // init stopped after moving it aside, the one it set aside (#823 item 17).
-  const carriedConfig = existingLocalConfig
+  let carriedConfig = existingLocalConfig
     ?? (await pathExists(existingConfigPath) ? null : await loadConfigSetAside(existingConfigPath));
-  const replacedFile = existingLocalConfig ? await readConfigFile(existingConfigPath) : carriedConfig;
+  const salvaged = existingLocalConfig || !(await pathExists(existingConfigPath)) ? null : await salvageConfigFile(existingConfigPath);
+  const replacedFile = existingLocalConfig ? await readConfigFile(existingConfigPath) : carriedConfig ?? salvaged?.file ?? null;
   let inheritUserScope: boolean | undefined;
   try {
     inheritUserScope = resolveInheritUserScope(
@@ -1848,6 +1890,20 @@ export async function init(options: GlobalOptions & {
     process.exit(1);
   }
 
+  // A config that does not validate but records this team repo is this install's own: its settings that validate
+  // are carried as a readable config's are (#1500).
+  const sameTeamSalvage = salvaged && remotesMatch(salvaged.file.repo.remote, repoInfo.httpsUrl) ? salvaged.file : null;
+  if (!carriedConfig && sameTeamSalvage) {
+    carriedConfig = sameTeamSalvage;
+    try {
+      inheritUserScope = resolveInheritUserScope(scope, options.inheritUserScope, carriedConfig.inheritUserScope);
+    } catch (e) {
+      log.error((e as Error).message);
+      process.exit(1);
+      return;
+    }
+  }
+
   // Step 3: Clone or link repo
   const defaultLocalPath = path.join(teamaiHome, 'team-repo');
   const localPath = expandHome(defaultLocalPath);
@@ -1866,9 +1922,13 @@ export async function init(options: GlobalOptions & {
       additionalRoles: [],
       ...(scope === 'project' ? { dataHome: teamaiHome } : {}),
     };
+    for (const line of salvaged?.dropped ?? []) log.warn(line);
+    // A config that does not validate still names its team repo: this install's own when it is the one init sets up.
     const replacesAnother = existingLocalConfig
       ? !sameQueueOwner(queueOwner(existingLocalConfig), queueOwner(next))
-      : await holdsInstallFor(scope, existingConfigPath);
+      : sameTeamSalvage
+        ? false
+        : await holdsInstallFor(scope, existingConfigPath);
     if (replacesAnother) await settleModeSwitch(existingLocalConfig, next, () => moveConfigAside(existingConfigPath, next));
     replacedInstallSettled = true;
   };
@@ -2426,7 +2486,7 @@ export async function init(options: GlobalOptions & {
 
   await ensureDir(teamaiHome);
   if (scope !== 'project') await ensureDir(getTeamaiHomeDir());
-  await settleModeSwitch(existingLocalConfig, localConfig, () =>
+  await settleModeSwitch(existingLocalConfig ?? sameTeamSalvage, localConfig, () =>
     scope === 'project' ? saveLocalConfigForScope(localConfig, scope, projectRoot) : saveLocalConfig(localConfig));
 
   if (scope === 'project') {
