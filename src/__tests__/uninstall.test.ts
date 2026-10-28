@@ -711,8 +711,8 @@ describe('uninstall', () => {
       expect(await fse.pathExists(path.join(projectConfig.dataHome!, 'env.sh'))).toBe(true);
       expect(await fse.pathExists(path.join(teamaiHome, 'config.yaml'))).toBe(false);
       if (detects) expect(await loaderBlocks(homeDir)).toBe(1);
-      const { log } = await import('../utils/logger.js');
-      expect(vi.mocked(log.warn).mock.calls.some(([message]) => String(message).includes(`Could not read ${registry}`))).toBe(true);
+      const { log: freshLog } = await import('../utils/logger.js');
+      expect(vi.mocked(freshLog.warn).mock.calls.some(([message]) => String(message).includes(`Could not read ${registry}`))).toBe(true);
     });
 
     it.each([
@@ -1545,13 +1545,13 @@ describe('uninstall', () => {
     await fse.outputFile(flat, '---\nalwaysApply: true\n---\n\nFrontend rule.\n');
     await fse.ensureDir(path.join(homeDir, '.claude', 'rules'));
     const localConfig = makeLocalConfig(homeDir, repoPath, { enabledAgents: ['omp', 'claude'] });
-    const { checkoutKey } = await import('../pull.js');
+    const { checkoutKey: freshCheckoutKey } = await import('../pull.js');
     const delivered: Record<string, string> = {};
     const { recordDelivered } = await import('../resources/delivered-copies.js');
     await recordDelivered(delivered, flat);
     await saveStateForScope({
       ...await loadStateForScope(localConfig),
-      lastPullByWorkspace: { [await checkoutKey(homeDir)]: { rev: 'r1', targets: [], delivered } },
+      lastPullByWorkspace: { [await freshCheckoutKey(homeDir)]: { rev: 'r1', targets: [], delivered } },
     }, localConfig);
     await fse.writeFile(flat, '---\nalwaysApply: true\n---\n\nMy own wording.\n');
     const defaults = TeamaiConfigSchema.parse({ team: 't', repo: 'owner/repo' }).toolPaths;
@@ -1692,12 +1692,12 @@ describe('uninstall', () => {
       repo: { localPath: repoPath, remote: '', kind: 'self', businessRepoRoot: projectRoot },
     });
     mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig: makeTeamConfig() });
-    const { log } = await import('../utils/logger.js');
-    vi.mocked(log.info).mockClear();
+    const { log: freshLog } = await import('../utils/logger.js');
+    vi.mocked(freshLog.info).mockClear();
 
     await uninstall({ force: true });
 
-    expect(log.info).not.toHaveBeenCalledWith('Nothing to uninstall');
+    expect(freshLog.info).not.toHaveBeenCalledWith('Nothing to uninstall');
     expect(await fse.readFile(excludeFile, 'utf8')).toBe('scratch/\n');
   });
 
@@ -1731,12 +1731,12 @@ describe('uninstall', () => {
       toolPaths: { claude: { skills: '.claude/skills', mcp: '.claude.json', mcpProject: '.mcp.json' } },
     });
     mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
-    const { log } = await import('../utils/logger.js');
+    const { log: freshLog } = await import('../utils/logger.js');
 
     await uninstall({ force: true });
 
     expect(await fse.readFile(excludeFile, 'utf8')).toBe(block);
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/.mcp.json\` in ${await fse.realpath(excludeFile)}`));
+    expect(freshLog.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/.mcp.json\` in ${await fse.realpath(excludeFile)}`));
   });
 
   describe('CodeBuddy and WorkBuddy share a project\'s .codebuddy/rules (#946)', () => {
@@ -2000,13 +2000,13 @@ describe('uninstall', () => {
     it('keeps the block when managed-mcp.json is gone and the token is still in .mcp.json', async () => {
       const { projectRoot, excludeFile } = await setup();
       await fse.writeJson(path.join(projectRoot, '.mcp.json'), { mcpServers: { jira } });
-      const { log } = await import('../utils/logger.js');
+      const { log: freshLog } = await import('../utils/logger.js');
 
       await uninstall({ force: true });
 
       expect(await fse.readJson(path.join(projectRoot, '.mcp.json'))).toEqual({ mcpServers: { jira } });
       expect(await fse.readFile(excludeFile, 'utf8')).toBe(block);
-      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/.mcp.json\` in ${await fse.realpath(excludeFile)}`));
+      expect(freshLog.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/.mcp.json\` in ${await fse.realpath(excludeFile)}`));
     });
 
     it('keeps the block when a server dropped from mcp.yaml left its token behind with no manifest', async () => {
@@ -2025,12 +2025,12 @@ describe('uninstall', () => {
       const { repoPath, projectRoot, excludeFile } = await setup();
       await fse.outputFile(path.join(repoPath, 'mcp', 'mcp.yaml'), 'servers:\n  - name: docs\n    transport: http\n    url: https://docs.example/mcp\n');
       await fse.writeJson(path.join(projectRoot, '.mcp.json'), { mcpServers: { jira } });
-      const { log } = await import('../utils/logger.js');
+      const { log: freshLog } = await import('../utils/logger.js');
 
       await uninstall({ force: true });
 
       expect(await fse.readFile(excludeFile, 'utf8')).toBe(block);
-      const warning = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/.mcp.json'));
+      const warning = vi.mocked(freshLog.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/.mcp.json'));
       expect(warning).toContain(path.join(await fse.realpath(projectRoot), '.mcp.json'));
       expect(warning).toContain(await fse.realpath(excludeFile));
     });
@@ -2097,12 +2097,12 @@ describe('uninstall', () => {
       withCodeBuddy(localConfig);
       vi.stubEnv('TEAM_BASE_URL', 'https://base.example');
       await fse.writeJson(path.join(projectRoot, '.mcp.json'), { mcpServers: { mine: { url: 'https://base.example/mcp' } } });
-      const { log } = await import('../utils/logger.js');
+      const { log: freshLog } = await import('../utils/logger.js');
 
       await uninstall({ force: true });
 
       expect(await fse.readFile(excludeFile, 'utf8')).toBe(block);
-      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('$TEAM_BASE_URL'));
+      expect(freshLog.warn).toHaveBeenCalledWith(expect.stringContaining('$TEAM_BASE_URL'));
     });
 
     it('keeps the block while a tool uninstall no longer reaches still holds teamai\'s server', async () => {
@@ -2131,13 +2131,13 @@ describe('uninstall', () => {
       const { trackResolvedMcpFiles, recordUnverifiedMcpServers } = await import('../mcp-resolved-files.js');
       await trackResolvedMcpFiles(localConfig, [{ tool: 'claude', file }]);
       expect(await recordUnverifiedMcpServers(localConfig, [{ file, names: ['jira'] }])).toBe('written');
-      const { log } = await import('../utils/logger.js');
+      const { log: freshLog } = await import('../utils/logger.js');
 
       await uninstall({ force: true });
 
       expect(await fse.readJson(file)).toEqual({ mcpServers: { jira } });
       expect(await fse.readFile(excludeFile, 'utf8')).toBe(block);
-      const warning = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/.mcp.json'));
+      const warning = vi.mocked(freshLog.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/.mcp.json'));
       expect(warning).toContain('jira');
     });
 
@@ -2156,12 +2156,12 @@ describe('uninstall', () => {
 
       it('keeps the block while it holds a server, naming it', async () => {
         const { excludeFile, old } = await setupRecorded({ mcpServers: { jira } });
-        const { log } = await import('../utils/logger.js');
+        const { log: freshLog } = await import('../utils/logger.js');
 
         await uninstall({ force: true });
 
         expect(await fse.readFile(excludeFile, 'utf8')).toBe(oldBlock);
-        const warning = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('team-mcp.json'));
+        const warning = vi.mocked(freshLog.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('team-mcp.json'));
         expect(warning).toContain(path.join(await fse.realpath(path.dirname(old)), 'team-mcp.json'));
         expect(warning).toContain('earlier toolPaths mapping');
       });
@@ -2210,12 +2210,12 @@ describe('uninstall', () => {
 
       it('keeps the landing path\'s line while the file there holds the token', async () => {
         const { excludeFile } = await setupLinked({ jira });
-        const { log } = await import('../utils/logger.js');
+        const { log: freshLog } = await import('../utils/logger.js');
 
         await uninstall({ force: true });
 
         expect(await fse.readFile(excludeFile, 'utf8')).toBe(landedBlock);
-        expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/config/mcp.json\` in ${await fse.realpath(excludeFile)}`));
+        expect(freshLog.warn).toHaveBeenCalledWith(expect.stringContaining(`Kept \`/config/mcp.json\` in ${await fse.realpath(excludeFile)}`));
       });
 
       it('removes it once the file there holds no server', async () => {
@@ -2315,12 +2315,12 @@ describe('uninstall', () => {
 
     it('keeps the block while the config there holds a server, saying teamai cannot judge it', async () => {
       const { excludeFile, linked, cursorDir } = await setupNestedLinked({ mcpServers: { mine: { url: 'https://mine.example/mcp' } } });
-      const { log } = await import('../utils/logger.js');
+      const { log: freshLog } = await import('../utils/logger.js');
 
       await uninstall({ force: true });
 
       expect(await fse.readFile(excludeFile, 'utf8')).toContain('/mcp.json');
-      const warning = vi.mocked(log.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/mcp.json'));
+      const warning = vi.mocked(freshLog.warn).mock.calls.map(([message]) => String(message)).find((m) => m.includes('/mcp.json'));
       expect(warning).toContain(path.join(await fse.realpath(linked), 'mcp.json'));
       expect(warning).toContain(`in a linked worktree of the repository at ${await fse.realpath(cursorDir)}`);
     });
@@ -2485,9 +2485,9 @@ describe('uninstall', () => {
     const localConfig = makeLocalConfig(projectRoot, repoPath, { scope: 'project', projectRoot });
     mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
     if (recorded) {
-      const { loadStateForScope, saveStateForScope } = await import('../config.js');
-      const state = await loadStateForScope(localConfig);
-      await saveStateForScope({ ...state, opencodeContextEntries: [{ config, entry: '.opencode/teamai-context.md' }] }, localConfig);
+      const { loadStateForScope: freshLoadStateForScope, saveStateForScope: freshSaveStateForScope } = await import('../config.js');
+      const state = await freshLoadStateForScope(localConfig);
+      await freshSaveStateForScope({ ...state, opencodeContextEntries: [{ config, entry: '.opencode/teamai-context.md' }] }, localConfig);
     }
 
     await uninstall({ force: true, agent: 'opencode' });
@@ -2520,9 +2520,9 @@ describe('uninstall', () => {
     } });
     const localConfig = makeLocalConfig(projectRoot, repoPath, { scope: 'project', projectRoot });
     mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
-    const { loadStateForScope, saveStateForScope } = await import('../config.js');
-    await saveStateForScope({
-      ...await loadStateForScope(localConfig),
+    const { loadStateForScope: freshLoadStateForScope, saveStateForScope: freshSaveStateForScope } = await import('../config.js');
+    await freshSaveStateForScope({
+      ...await freshLoadStateForScope(localConfig),
       opencodeContextEntries: [{ config, entry }, { config: siblingConfig, entry }],
     }, localConfig);
 
@@ -2531,7 +2531,7 @@ describe('uninstall', () => {
 
     expect((await fse.readJson(config)).instructions).toBeUndefined();
     expect((await fse.readJson(siblingConfig)).instructions).toEqual([entry]);
-    expect((await loadStateForScope(localConfig)).opencodeContextEntries).toEqual([{ config: siblingConfig, entry }]);
+    expect((await freshLoadStateForScope(localConfig)).opencodeContextEntries).toEqual([{ config: siblingConfig, entry }]);
   });
 
   it.each([
@@ -3729,14 +3729,14 @@ describe('uninstall', () => {
 
     const localConfig = makeLocalConfig(homeDir, repoPath);
     mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig: makeTeamConfig() });
-    const { log } = await import('../utils/logger.js');
+    const { log: freshLog } = await import('../utils/logger.js');
     try {
       await uninstall({ force: true });
     } finally {
       await fse.chmod(stubDir, 0o755);
     }
 
-    const warnings = (log.warn as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    const warnings = (freshLog.warn as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
     const about = warnings.filter((w) => w.includes(stubDir));
     // The error, then the records kept so the retry can find what is left.
     expect(about).toEqual([

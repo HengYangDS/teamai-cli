@@ -1517,7 +1517,7 @@ describe('a checkout an older git-mode install left (#808)', () => {
       home,
     ));
     expect(queued.output).toContain('Saved locally');
-    const [name] = partitionQueue(install).filter((f) => f.startsWith('team-a-note-'));
+    const name = partitionQueue(install).find((f) => f.startsWith('team-a-note-'))!;
     expect(name, partitionQueue(install).join('\n')).toBeDefined();
 
     // A search index built from team A's knowledge.
@@ -1544,7 +1544,7 @@ describe('a checkout an older git-mode install left (#808)', () => {
       home,
     ));
     expect(queuedForSwitch.output).toContain('Saved locally');
-    const [switchName] = partitionQueue(install).filter((f) => f.startsWith('team-a-switch-note-'));
+    const switchName = partitionQueue(install).find((f) => f.startsWith('team-a-switch-note-'))!;
     expect(switchName, partitionQueue(install).join('\n')).toBeDefined();
 
     const initB = await runCLI(['init', teamB.url, '--scope', 'project', '--force'], projectRoot, home);
@@ -1585,7 +1585,7 @@ describe('a checkout an older git-mode install left (#808)', () => {
       home,
     ));
     expect(queued.output).toContain('Saved locally');
-    const [name] = partitionQueue(install).filter((f) => f.startsWith('team-a-note-'));
+    const name = partitionQueue(install).find((f) => f.startsWith('team-a-note-'))!;
     expect(name, partitionQueue(install).join('\n')).toBeDefined();
 
     const failed = await runCLI(['init', teamB.url, '--scope', 'project', '--force', '--role', 'ghost'], projectRoot, home);
@@ -1718,7 +1718,7 @@ describe('a checkout an older git-mode install left (#808)', () => {
       home,
     ));
     expect(queued.output).toContain('Saved locally');
-    const [name] = partitionQueue(install).filter((f) => f.startsWith('team-a-note-'));
+    const name = partitionQueue(install).find((f) => f.startsWith('team-a-note-'))!;
     expect(name, partitionQueue(install).join('\n')).toBeDefined();
 
     // The config naming team A no longer parses, so nothing says whose queue it is.
@@ -1751,12 +1751,12 @@ describe('a checkout an older git-mode install left (#808)', () => {
 
     const initA = await runCLI(['init', teamA.url, '--scope', 'project', '--force'], projectRoot, home);
     expect(initA.code, initA.output).toBe(0);
-    const published = await runCLI(
+    const contributeA = await runCLI(
       ['contribute', '--title', 'team-a-note', '--file', note(install, 'team-a', 'Note for team A')],
       projectRoot,
       home,
     );
-    expect(published.code, published.output).toBe(0);
+    expect(contributeA.code, contributeA.output).toBe(0);
     const partition = partitionOf(install);
     const checkout = path.join(partition, 'learnings-wt');
     const draft = path.join(checkout, 'learnings', 'team-a-draft-2026-01-01-aaaaaa.md');

@@ -125,7 +125,7 @@ function indentedList(entries: string[]): string {
 
 /** The newest entries under `dir`, with how long ago each was last written. */
 function reappeared(dir: string): string[] {
-  const now = Date.now();
+  const nowMs = Date.now();
   let names: string[];
   try {
     names = fs.readdirSync(dir, { recursive: true, encoding: 'utf-8' });
@@ -140,7 +140,7 @@ function reappeared(dir: string): string[] {
     }
   });
   entries.sort((a, b) => b.mtime - a.mtime);
-  const listed = entries.slice(0, MAX_LISTED).map(({ name, mtime }) => `${name} (written ${Math.max(0, Math.round(now - mtime))}ms ago)`);
+  const listed = entries.slice(0, MAX_LISTED).map(({ name, mtime }) => `${name} (written ${Math.max(0, Math.round(nowMs - mtime))}ms ago)`);
   return entries.length > MAX_LISTED ? [...listed, `and ${entries.length - MAX_LISTED} more`] : listed;
 }
 

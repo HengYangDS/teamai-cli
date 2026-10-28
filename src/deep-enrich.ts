@@ -457,8 +457,8 @@ async function runPhaseComponents(
         batch.map(async (_, idx) => {
           try {
             return (await callTool(tasks[idx].prompt, { launchedBy: 'deep-enrich' })).text;
-          } catch (e) {
-            log.warn(`deep-enrich[${project}]: Skipping component ${batch[idx].slug}: ${(e as Error).message}`);
+          } catch (componentError) {
+            log.warn(`deep-enrich[${project}]: Skipping component ${batch[idx].slug}: ${(componentError as Error).message}`);
             return null as unknown as string;
           }
         }),

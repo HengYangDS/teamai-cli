@@ -122,8 +122,8 @@ describe('deliveredUnion', () => {
     const spawnsFor = async (count: number) => {
       const checkouts = [...await listers(count), { root: wt, paths: [] }];
       await fse.remove(log);
-      const union = await deliveredUnion(checkouts);
-      expect(union.foreign).toHaveLength(count * rels.length);
+      const result = await deliveredUnion(checkouts);
+      expect(result.foreign).toHaveLength(count * rels.length);
       return (await fse.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
     };
     await spawnsFor(1);

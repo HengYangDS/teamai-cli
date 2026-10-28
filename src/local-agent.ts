@@ -969,11 +969,11 @@ export async function localAgentCopyFiles(
     }
     const result = { teamais: [] as string[], members: [] as string[] };
     const walk = async (dir: string, rel: string): Promise<void> => {
-      for (const entry of await fse.readdir(dir, { withFileTypes: true }).catch(() => [])) {
-        const file = path.join(dir, entry.name);
-        const entryRel = rel ? `${rel}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) await walk(file, entryRel);
-        else if (entry.isFile() && expected.get(entryRel) === await fileHash(file)) result.teamais.push(file);
+      for (const dirEntry of await fse.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        const file = path.join(dir, dirEntry.name);
+        const entryRel = rel ? `${rel}/${dirEntry.name}` : dirEntry.name;
+        if (dirEntry.isDirectory()) await walk(file, entryRel);
+        else if (dirEntry.isFile() && expected.get(entryRel) === await fileHash(file)) result.teamais.push(file);
         else result.members.push(file);
       }
     };
@@ -2730,10 +2730,10 @@ async function removeLocalAgentGitExclude(roots: string[]): Promise<string[]> {
       for (const root of await listWorktrees(path.dirname(path.dirname(file)))) checkouts.add(root);
     }
     const keep = async ({ line, excludeFile }: { line: string; excludeFile: string }): Promise<boolean> => {
-      const left = await modelFilesBehind(line, excludeFile, { roots: [...checkouts] });
-      if (left === null) return true;
+      const behindFiles = await modelFilesBehind(line, excludeFile, { roots: [...checkouts] });
+      if (behindFiles === null) return true;
       // A file the repository tracks is not hidden by its line.
-      for (const file of left) if ((await gitTracks(file, 'entry')).kind !== 'tracked') return true;
+      for (const file of behindFiles) if ((await gitTracks(file, 'entry')).kind !== 'tracked') return true;
       return false;
     };
     for (const { excludeFile, write, removed } of await removeGitExclude(localAgentGitExcludeOwner(), { keep })) {
@@ -2858,14 +2858,14 @@ async function syncClaudemd(
       skipped.push(...plan.warnings);
       continue;
     }
-    const { failures, files } = await applyInstructionPlan(plan, { dryRun: false });
+    const { failures, files: writtenFiles } = await applyInstructionPlan(plan, { dryRun: false });
     if (failures.length > 0) {
       log.warn(`Failed to sync CLAUDE.md instructions to ${tool}: ${failures.join(' ')}`);
       skipped.push(...failures);
       continue;
     }
     if (tool === 'opencode') {
-      await registerOpencodeContext(teamConfig, localConfig, { targets: [target], stale: [], opencodeFallback: viaClaude ? claudeUserFile : null }, false, files);
+      await registerOpencodeContext(teamConfig, localConfig, { targets: [target], stale: [], opencodeFallback: viaClaude ? claudeUserFile : null }, false, writtenFiles);
       // OpenCode V1 reads the file only through its `instructions` entry.
       if (block && !viaClaude) {
         const { opencodeContextReference, readOpencodeInstructionList } = await import('./resources/opencode-config.js');
@@ -3088,6 +3088,7 @@ async function readJsonObject(filePath: string): Promise<Record<string, unknown>
   } catch (error) {
     throw new Error(
       `apply_model_config: cannot parse ${modelConfigDisplayPath(filePath)}: ${(error as Error).message}`,
+      { cause: error },
     );
   }
 }
@@ -3317,6 +3318,7 @@ async function readBuddyModelEntries(
   } catch (error) {
     throw new Error(
       `apply_model_config: cannot parse ${modelConfigDisplayPath(filePath)}: ${(error as Error).message}`,
+      { cause: error },
     );
   }
 }
@@ -3704,7 +3706,7 @@ async function runCmdCommand(
       : err.killed
         ? 'cmd timed out'
         : 'cmd failed';
-    throw new Error(`${prefix}: ${detail}`);
+    throw new Error(`${prefix}: ${detail}`, { cause: e });
   }
 }
 
@@ -3877,7 +3879,7 @@ async function mcpPlaceOf(
   teamConfig: TeamaiConfig, localConfig: LocalConfig, tool: string,
 ): Promise<(McpTarget & { key: McpKey }) | null> {
   const target = (await resolveMcpTargets(teamConfig, localConfig, { includeUndetected: true }))
-    .find((target) => target.tool === tool && !target.builtinFallback);
+    .find((candidate) => candidate.tool === tool && !candidate.builtinFallback);
   return target === undefined ? null : { ...target, key: mcpKeyOf(target) };
 }
 
@@ -4079,7 +4081,7 @@ async function installMcpServer(
             throw new Error(
               `install_mcp: ownership write failed (${error instanceof Error ? error.message : String(error)}), and restoring ${targetFile} failed `
               + `(${restoreError instanceof Error ? restoreError.message : String(restoreError)}). The config may not match ${manifestPath}. Repair the config and ownership record after fixing both write errors, then install the server again.`,
-              { cause: error },
+              { cause: restoreError },
             );
           }
         }
@@ -4195,7 +4197,7 @@ async function uninstallMcpServer(
   // flag picked when it was installed (#915): taken out wherever a record places it.
   const places = projectScope && workspacePath ? await workspaceMcpLocations(config, localConfig, tool, workspacePath) : null;
   const locations: Array<{ manifestKey: string; file?: string; projectKey?: string }> = places
-    ? [places.local, places.tree].map((place) => ({ manifestKey: mcpManifestKey(place), file: place.file, projectKey: place.projectKey }))
+    ? [places.local, places.tree].map((loc) => ({ manifestKey: mcpManifestKey(loc), file: loc.file, projectKey: loc.projectKey }))
     : [{ manifestKey: managedMcpManifestKey(tool, projectScope) }];
 
   for (const { manifestKey, file, projectKey } of locations) {
@@ -4243,7 +4245,7 @@ async function uninstallMcpServer(
           throw new Error(
             `uninstall_mcp: ownership write failed (${error instanceof Error ? error.message : String(error)}), and restoring ${where} failed `
             + `(${restoreError instanceof Error ? restoreError.message : String(restoreError)}). The config may not match ${manifestPath}. Repair the config and ownership record after fixing both write errors, then uninstall the server again.`,
-            { cause: error },
+            { cause: restoreError },
           );
         }
       }

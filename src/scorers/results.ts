@@ -225,8 +225,8 @@ function judgeCohort(judge: ScoreLabel['judge']): JudgeCohort {
 /** A model judge with the team alias its newest label named it by, which a cohort shows but never tells judges apart by. */
 function withAlias(judge: JudgeCohort, newestFirst: readonly ViewedLabel[]): JudgeCohort {
   if (judge.kind !== 'model' || !judge.model) return judge;
-  const newest = newestFirst[0]?.label.judge;
-  const alias = newest?.kind === 'model' ? newest.model?.alias : undefined;
+  const newestJudge = newestFirst[0]?.label.judge;
+  const alias = newestJudge?.kind === 'model' ? newestJudge.model?.alias : undefined;
   return alias ? { ...judge, model: { ...judge.model, alias } } : judge;
 }
 

@@ -20,7 +20,7 @@ const LABELS: Readonly<Record<string, ToolId>> = {
   'Trae CN': 'trae-cn', ZCode: 'zcode', JoyCode: 'joycode', 'Muse Code': 'muse',
 };
 /** Internal builds the README leaves out. */
-const UNLISTED: readonly ToolId[] = ['claude-internal', 'codex-internal', 'tclaude', 'tcodex'];
+const UNLISTED: ReadonlySet<ToolId> = new Set(['claude-internal', 'codex-internal', 'tclaude', 'tcodex']);
 
 function rows(file: string): Map<string, readonly string[]> {
   const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
@@ -37,16 +37,16 @@ function cell(row: readonly string[], column: Column): string | undefined {
 
 /** `✓` or `—` when the descriptor's mark decides it, else undefined (`?`). */
 function decided(support: Support): '✓' | '—' | undefined {
-  const cell = typeof support === 'string' ? support : support.cell;
-  if (cell === '?') return undefined;
-  return cell.startsWith('✓') || cell.startsWith('◐') ? '✓' : '—';
+  const mark = typeof support === 'string' ? support : support.cell;
+  if (mark === '?') return undefined;
+  return mark.startsWith('✓') || mark.startsWith('◐') ? '✓' : '—';
 }
 
 describe('README agent matrix', () => {
   const matrix = rows('README.md');
 
   it('lists every tool but the internal builds', () => {
-    const tools = Object.keys(DEFAULT_TOOL_PATHS).filter(isToolId).filter((tool) => !UNLISTED.includes(tool));
+    const tools = Object.keys(DEFAULT_TOOL_PATHS).filter(isToolId).filter((tool) => !UNLISTED.has(tool));
     expect([...matrix.keys()].map((label) => LABELS[label]).sort()).toEqual(tools.sort());
   });
 

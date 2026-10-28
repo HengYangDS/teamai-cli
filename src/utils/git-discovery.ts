@@ -106,7 +106,7 @@ async function configuredWorkTrees(gitDir: string, configFiles: readonly string[
   const texts = await Promise.all(configFiles.map((file) => fs.promises.readFile(file, 'utf8').catch(() => '')));
   const values: string[] = [];
   const key = /^\s*(?:\[[^\]]*\]\s*)*worktree\s*(?:=|$)/i;
-  for (const line of texts.flatMap((text) => text.split('\n')).filter((line) => key.test(line))) {
+  for (const line of texts.flatMap((text) => text.split('\n')).filter((candidate) => key.test(candidate))) {
     const value = /^\s*(?:\[[^\]"]*\]\s*)*worktree\s*=(.*)$/i.exec(line)?.[1]?.trim();
     if (value === undefined || /["\\#;]/.test(value)) return null;
     values.push(value);

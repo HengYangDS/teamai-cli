@@ -852,7 +852,7 @@ describe('doctor — where a tool takes skills', () => {
 
     expect(atRoot.notes).toContain(`pi reads project skills only from a session started in ${project}.`);
     expect([inSubdir.notes, elsewhere.notes]).toEqual([atRoot.notes, atRoot.notes]);
-    const readChecks = ({ checks }: DoctorReport) => checks.filter((check) => check.name.includes(' reads the '));
+    const readChecks = ({ checks: reportChecks }: DoctorReport) => reportChecks.filter((check) => check.name.includes(' reads the '));
     expect(readChecks(atRoot).map((check) => check.name)).toEqual(['pi reads the skills teamai writes']);
     expect(readChecks(atRoot).map((check) => check.ok)).toEqual([true]);
     expect([readChecks(inSubdir), readChecks(elsewhere)]).toEqual([readChecks(atRoot), readChecks(atRoot)]);

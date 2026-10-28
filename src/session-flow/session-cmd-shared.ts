@@ -237,6 +237,7 @@ export async function resolveRepoRoot(
     if (!(e instanceof NotInitializedError)) throw e;
     throw new Error(
       'teamai is not set up for this directory. It has no workspace install, and there is no user install. Run `teamai init`, or pass --repo-root <path to the team repo clone>.',
+      { cause: e },
     );
   }
   const archives = await sessionArchives(cfg, options);
@@ -264,7 +265,7 @@ export async function sessionArchives(
   try {
     return { root: await readableReportsWorktree(cfg, { dryRun: options.dryRun }), reports: cfg, ...legacy };
   } catch (e) {
-    throw new Error(safeText(e instanceof Error ? e.message : String(e)));
+    throw new Error(safeText(e instanceof Error ? e.message : String(e)), { cause: e });
   }
 }
 

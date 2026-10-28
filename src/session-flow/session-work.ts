@@ -63,7 +63,7 @@ function capturedTeamSkillsAt(captures: readonly SessionCapture[]): (timestamp: 
   return (timestamp) => {
     const at = timestamp === undefined ? Number.NaN : Date.parse(timestamp);
     if (Number.isNaN(at)) return alike ? first.teamSkills ?? {} : {};
-    const inEffect = captures.filter((capture) => Date.parse(capture.capturedAt) <= at).pop();
+    const inEffect = captures.findLast((capture) => Date.parse(capture.capturedAt) <= at);
     return inEffect?.teamSkills ?? {};
   };
 }

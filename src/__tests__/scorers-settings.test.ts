@@ -77,15 +77,15 @@ describe('scopeScoring batch', () => {
   });
 
   it('fails when two active namespaces set batch differently, and not when they agree', async () => {
-    const both = { primaryRole: 'ops', additionalRoles: ['sre'] };
+    const member = { primaryRole: 'ops', additionalRoles: ['sre'] };
 
-    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: true\n' }, both))).toEqual({
+    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: true\n' }, member))).toEqual({
       ok: false,
       reason: 'batch is false in scorers/ops/scoring.yaml and true in scorers/sre/scoring.yaml, and both namespaces are active here, so nothing '
         + 'says which one you should receive. Remove batch from one of the files, or stop declaring one of the namespaces for your roles and '
         + 'projects. Scoring is off in this scope until the team repo fixes it.',
     });
-    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: false\n' }, both))).toMatchObject({ ok: true, batch: false });
+    expect(await scopeScoring(teamRepo({ ...files, 'scorers/sre/scoring.yaml': 'batch: false\n' }, member))).toMatchObject({ ok: true, batch: false });
   });
 
   it('ignores a batch that is not true or false, with a problem', async () => {

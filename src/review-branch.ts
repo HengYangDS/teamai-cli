@@ -1034,7 +1034,7 @@ function closingQuote(line: string, open: number): number {
   const quote = line.charAt(open);
   for (let at = line.indexOf(quote, open + 1); at >= 0; at = line.indexOf(quote, at + 1)) {
     let backslashes = 0;
-    while (quote === '"' && line.charAt(at - 1 - backslashes) === '\\') backslashes++;
+    if (quote === '"') while (line.charAt(at - 1 - backslashes) === '\\') backslashes++;
     if (backslashes % 2 === 0) return at;
   }
   return -1;

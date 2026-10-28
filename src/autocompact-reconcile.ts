@@ -306,7 +306,7 @@ function multilineOpenAfter(line: string, open: MultilineQuote | null): Multilin
     if (open !== null) {
       let close = line.indexOf(open, i);
       // In a basic string, a quote after an odd run of backslashes is escaped.
-      while (close > 0 && open === '"""' && backslashesBefore(line, close) % 2 === 1) close = line.indexOf(open, close + 1);
+      if (open === '"""') while (close > 0 && backslashesBefore(line, close) % 2 === 1) close = line.indexOf(open, close + 1);
       if (close === -1) return open;
       i = close + 3;
       open = null;
@@ -361,7 +361,7 @@ async function readCurrent(t: Target): Promise<{ current: string | undefined; do
   }
   const rows = parseRows(source);
   if (rows === null) return 'unreadable';
-  const row = rows.filter((r) => r?.id === DSH_ROW_ID).at(-1);
+  const row = rows.findLast((r) => r?.id === DSH_ROW_ID);
   return { current: row ? JSON.stringify(row.config ?? null) : undefined };
 }
 

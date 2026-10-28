@@ -217,7 +217,6 @@ describe('recall gate on served skills', () => {
     expect(stderr).toContain('Migrated legacy');
 
     stdout = '';
-    const { skillList } = await import('../skill-cmd.js');
     await skillList({ json: true });
     expect(() => JSON.parse(stdout)).not.toThrow();
   });

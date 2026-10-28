@@ -267,8 +267,8 @@ function print(result: DrainResult): void {
   for (const { run: runId, archived, skipped } of result.steps) {
     if (archived > 0) log.success(`Archived ${plural({ count: archived, one: 'step session', many: 'step sessions' })} of ${runId} to teamai-reports (scrubbed)`);
     for (const reason of new Set(skipped.map((pass) => pass.reason))) {
-      const passes = skipped.filter((pass) => pass.reason === reason);
-      log.info(`Skipped ${plural({ count: passes.length, one: 'step session', many: 'step sessions' })} of ${runId}: ${reason} (${passes.map((pass) => `${pass.step}, pass ${pass.pass}`).join('; ')})`);
+      const skippedPasses = skipped.filter((pass) => pass.reason === reason);
+      log.info(`Skipped ${plural({ count: skippedPasses.length, one: 'step session', many: 'step sessions' })} of ${runId}: ${reason} (${skippedPasses.map((pass) => `${pass.step}, pass ${pass.pass}`).join('; ')})`);
     }
   }
   if (result.unpublished.length > 0) log.error(unpublishedText(result.unpublished));

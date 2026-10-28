@@ -431,7 +431,7 @@ function buildModuleSummaries(
       lines.push('');
       lines.push('## Config');
       lines.push('');
-      for (const f of moduleFacts.filter(f => f.kind === 'config').slice(0, 10)) {
+      for (const f of moduleFacts.filter(fact => fact.kind === 'config').slice(0, 10)) {
         lines.push(`- \`${f.name}\` ← ${f.file}`);
       }
     }
@@ -440,7 +440,7 @@ function buildModuleSummaries(
       lines.push('');
       lines.push('## Errors');
       lines.push('');
-      for (const f of moduleFacts.filter(f => f.kind === 'error').slice(0, 10)) {
+      for (const f of moduleFacts.filter(fact => fact.kind === 'error').slice(0, 10)) {
         lines.push(`- \`${f.name}\` ← ${f.file}`);
       }
     }
@@ -539,8 +539,8 @@ function buildOverview(
     lines.push('## Key Dependency Paths');
     lines.push('');
     for (const chain of callChains.slice(0, 5)) {
-      const path = chain.steps.map(s => s.symbol).join(' → ');
-      lines.push(`- ${chain.entryPoint}: ${path}`);
+      const chainPath = chain.steps.map(s => s.symbol).join(' → ');
+      lines.push(`- ${chain.entryPoint}: ${chainPath}`);
     }
   }
 

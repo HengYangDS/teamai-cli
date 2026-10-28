@@ -41,8 +41,8 @@ export function judgeAccess(tool: JudgeTool): JudgeAccess {
   return judgeProfile(tool).access;
 }
 
-function profileIsolation(tool: JudgeTool, version: string, insideCheckout: boolean): Isolation {
-  return judgeProfile(tool).verified?.test(version) && !insideCheckout ? 'verified' : 'best-effort';
+function profileIsolation(tool: JudgeTool, version: string, isInsideCheckout: boolean): Isolation {
+  return judgeProfile(tool).verified?.test(version) && !isInsideCheckout ? 'verified' : 'best-effort';
 }
 
 export interface JudgeToolLevel {
@@ -204,7 +204,7 @@ async function answerFrom(tool: JudgeTool, stdout: string, tmp: string): Promise
     case 'claude':
     case 'codebuddy':
     case 'cursor': {
-      const last = records(stdout).filter((record) => record.type === 'result').at(-1);
+      const last = records(stdout).findLast((record) => record.type === 'result');
       const structured = JudgeAnswerSchema.safeParse(last?.structured_output);
       if (structured.success) return structured.data;
       return parseAnswer(typeof last?.result === 'string' ? last.result : '');
@@ -325,7 +325,7 @@ export async function runLocalJudge(input: JudgeInput, { resolveTool = resolveCl
     const report = toolStdout(family, result.stdout);
     const reading = LAUNCH_ADAPTERS[family].call.read({ stdout: result.stdout, lastMessage: undefined });
     const tokens = report?.tokens ?? (reading.ok ? reading.tokens : undefined);
-    const cost = records(result.stdout).filter((record) => typeof record.total_cost_usd === 'number').at(-1)?.total_cost_usd;
+    const cost = records(result.stdout).findLast((record) => typeof record.total_cost_usd === 'number')?.total_cost_usd;
     const spent = tokens || typeof cost === 'number'
       ? { usage: { ...(tokens?.input !== undefined ? { inputTokens: tokens.input } : {}), ...(tokens?.output !== undefined ? { outputTokens: tokens.output } : {}), ...(typeof cost === 'number' ? { cost: { amount: cost, unit: 'USD' } } : {}) } }
       : {};

@@ -192,9 +192,9 @@ function stepTool(agent: string | undefined, config: LocalConfig, flags: Record<
     ...members.filter(({ source }) => source !== 'TEAMAI_AI_TOOL').map(member),
   ];
   const passed: { source: string; named: string }[] = [];
-  for (const { source, named, member } of rungs) {
+  for (const { source, named, member: isMember } of rungs) {
     if (!named) continue;
-    if (member && !isLaunchTool(named)) {
+    if (isMember && !isLaunchTool(named)) {
       if (!LAUNCH_ORDER.some((tool) => tool === named)) {
         return { ok: false, failure: { code: 'tool_unsupported', message: `${source} is "${named}", which is not a tool teamai launches. Set it to one of: ${LAUNCH_TOOLS.join(', ')}.` } };
       }
@@ -701,12 +701,12 @@ async function driveRun(config: LocalConfig, lock: RunLock, cwd: string, options
       clearTimeout(timer);
       if (!exited) continue;
       if (exited.kind === 'question') {
-        const hitl = question!.hitl;
+        const questionHitl = question!.hitl;
         question = undefined;
         if (exited.line === undefined) return { error: { code: 'interrupted', message: 'The HITL question closed without an answer. Continue with teamai workflow resume.' } };
         const [choice = '', ...words] = exited.line.trim().split(/\s+/);
         const provenance = respondProvenance({ kind: 'terminal', caller: callerProvenance(process.env, { isTTY: true }) });
-        const answer = await respondToHitl(config, runId, turn.secrets, { step: hitl.step, pass: hitl.pass, choice, ...(words.length > 0 ? { note: words.join(' ') } : {}), provenance });
+        const answer = await respondToHitl(config, runId, turn.secrets, { step: questionHitl.step, pass: questionHitl.pass, choice, ...(words.length > 0 ? { note: words.join(' ') } : {}), provenance });
         if (isWorkflowError(answer)) {
           // agent_in_path: the driver runs inside an agent session; it keeps waiting for the person's answer from elsewhere.
           if (!['repeated_response', 'stale_response', 'invalid_choice', 'not_waiting', 'run_settled', 'agent_in_path'].includes(answer.error.code)) return answer;

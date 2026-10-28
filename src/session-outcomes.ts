@@ -254,9 +254,9 @@ async function fold(input: FoldInput): Promise<OutcomeFold> {
   const prs = await readPrCache(input.config);
   let prsChanged = false;
   // Each lookup may wait on a host, so they run together; one that fails leaves its pull request out.
-  const finished = (await Promise.all(pending.map(async ({ sessionId, facts: kept, isDue }): Promise<FinishedSession[]> => {
-    const cwd = await checkoutOf(kept);
-    const facts = cwd && isDue && sessionId === input.drain?.running ? await withHeadNow(kept, cwd) : kept;
+  const finished = (await Promise.all(pending.map(async ({ sessionId, facts: pendingFacts, isDue }): Promise<FinishedSession[]> => {
+    const cwd = await checkoutOf(pendingFacts);
+    const facts = cwd && isDue && sessionId === input.drain?.running ? await withHeadNow(pendingFacts, cwd) : pendingFacts;
     const commits = cwd ? await sessionCommits(cwd, facts) : [];
     // A session that has since stopped on another branch is asked about that one.
     if (cwd && commits.length > 0 && facts.endBranch && prs[sessionId]?.branch !== facts.endBranch) {

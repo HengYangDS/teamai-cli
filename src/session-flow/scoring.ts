@@ -327,10 +327,10 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
     const chosen = chooseJudgeModel(aliases, member.definition, tools);
     if (!chosen.ok) return failure('judge_model_unavailable', chosen.message);
     if (chosen.note) log.info(chosen.note);
-    const judged = { ...member, ...(chosen.choice.alias !== undefined ? { alias: chosen.choice.alias } : {}) };
+    const judgedMember = { ...member, ...(chosen.choice.alias !== undefined ? { alias: chosen.choice.alias } : {}) };
     const group = batch ? groups.find(({ choice }) => choice.tool === chosen.choice.tool && choice.model?.name === chosen.choice.model?.name && choice.model?.effort === chosen.choice.model?.effort) : undefined;
-    if (group) group.members.push(judged);
-    else groups.push({ choice: chosen.choice, members: [judged] });
+    if (group) group.members.push(judgedMember);
+    else groups.push({ choice: chosen.choice, members: [judgedMember] });
   }
   const control = files.size > 0 ? judgeSession({ platform, found: firstPromptOnly(found), captures: [], mask }) : undefined;
   const answers: Array<Record<string, unknown>> = [];
@@ -395,7 +395,7 @@ export async function scoreSession(from: LocalConfig, demand: SessionDemand, now
   const [firstTried] = tried;
   const scored = only && more.length === 0
     ? { label: only, ...(firstTried ? { stored: firstTried.stored, control: firstTried.control } : {}) }
-    : { labels: answers, ...(firstTried ? { stored: Object.fromEntries(tried.map(({ scorer, stored }) => [scorer, stored])), control: Object.fromEntries(tried.map(({ scorer, control }) => [scorer, control])) } : {}) };
+    : { labels: answers, ...(firstTried ? { stored: Object.fromEntries(tried.map(({ scorer, stored }) => [scorer, stored])), control: Object.fromEntries(tried.map(({ scorer, control: scorerControl }) => [scorer, scorerControl])) } : {}) };
   return answered(config, scored, demand.push);
 }
 

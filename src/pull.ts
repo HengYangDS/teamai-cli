@@ -2538,16 +2538,16 @@ async function pullForScope(
   if (!options.silent && !options.dryRun && desiredSkillNames) {
     try {
       const YAML = (await import('yaml')).default;
-      const { listFiles, readFileSafe } = await import('./utils/fs.js');
+      const { listFiles: listStatsFiles, readFileSafe: readStatsFile } = await import('./utils/fs.js');
       const { getRecommendations, displayRecommendations } = await import('./skill-recommend.js');
       // stats/ is read from the refreshed reports worktree (see resolveReportsReadRoot).
       const reportsRoot = await resolveReportsReadRoot();
       const statsDir = reportsRoot ? path.join(reportsRoot, 'stats') : undefined;
-      const files = statsDir ? await listFiles(statsDir) : [];
+      const files = statsDir ? await listStatsFiles(statsDir) : [];
       const teamStats = [];
       for (const file of files) {
         if (!file.endsWith('.yaml')) continue;
-        const content = await readFileSafe(path.join(statsDir!, file));
+        const content = await readStatsFile(path.join(statsDir!, file));
         if (!content) continue;
         try {
           const parsed = YAML.parse(content);
@@ -2780,7 +2780,7 @@ async function syncManagedInstructions(
     if (!dryRun && !opencodeFallback && targets.some((target) => target.tools.includes('opencode'))
       && Object.values(blocks).some(Boolean) && !await opencodeDeliversThroughPlugin(config, localConfig)) {
       const { opencodeContextReference, readOpencodeInstructionList } = await import('./resources/opencode-config.js');
-      const target = targets.find((target) => target.tools.includes('opencode'))!;
+      const target = targets.find((candidate) => candidate.tools.includes('opencode'))!;
       const { config: file, entry } = opencodeContextReference(target.path, localConfig.scope, resolveBaseDir(localConfig));
       opencodeReady = (await readOpencodeInstructionList(file))?.includes(entry) ?? false;
     }
@@ -3416,14 +3416,14 @@ export async function pull(
         // still truncates, even if pull has already stopped waiting.
         for (const t of targets) {
           const eventCount = (await readUsageEvents(t.opts.selfConfig)).length;
-          let reported = false;
+          let usageReported = false;
           try {
-            reported = await reportUsage(t.repoPath, t.username, t.opts) !== 'unreported';
-            if (reported && eventCount > 0) await truncateUsageAfterReport(eventCount, t.opts.selfConfig);
+            usageReported = await reportUsage(t.repoPath, t.username, t.opts) !== 'unreported';
+            if (usageReported && eventCount > 0) await truncateUsageAfterReport(eventCount, t.opts.selfConfig);
           } catch (e) {
             log.error(`Auto-report to ${t.repoPath} skipped: ${(e as Error).message}`);
           } finally {
-            reportOutcomes.set(t.opts.selfConfig, { reported, at: new Date().toISOString() });
+            reportOutcomes.set(t.opts.selfConfig, { reported: usageReported, at: new Date().toISOString() });
           }
           // Drain queued workflow run records (#1083): a publication that
           // failed at run start/end is retried here, once per pull.
@@ -3830,10 +3830,10 @@ async function reportPostPullChecks(
     // tool, agents parse every spec — so the cheap ones still get to run.
     const { local, results } = await withTimeout(
       (async () => {
-        const local = (await buildChecks(ctx, 'pull'))
+        const localChecks = (await buildChecks(ctx, 'pull'))
           .filter((c) => c.source === 'local')
           .filter((c) => !c.reportedByPull || !reported.has(c.reportedByPull));
-        return { local, results: await runChecks(local) };
+        return { local: localChecks, results: await runChecks(localChecks) };
       })(),
       POST_PULL_CHECKS_TIMEOUT_MS,
       `Post-pull checks are still running after ${POST_PULL_CHECKS_TIMEOUT_MS}ms`,
