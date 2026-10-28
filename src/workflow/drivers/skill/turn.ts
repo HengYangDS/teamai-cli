@@ -30,6 +30,8 @@ export type DescribeAsk =
     };
   }
   | { kind: 'local'; reason: string; start: Literal }
+  /** The session names no tool the run needs: the agent fills `describe`'s `{tool}` slot with the one of `tools` it works in, and describes again. */
+  | { kind: 'tool'; reason: string; describe: Literal; tools: string[] }
   /** `invoke: deny` asked from an agent session, or a start this checkout would refuse for its delivery: no literal. */
   | { kind: 'denied'; reason: string };
 
@@ -221,7 +223,10 @@ function refusalNext(refusal: Refusal, context: { invocation: Invocation; same: 
       // Only a start is refused for it, and its describe keeps the tool the start declared.
       return context.same;
     case 'not_skill_run':
-      return skillResumeLiteral(invocation, refusal.run);
+      return skillResumeLiteral(invocation, refusal.run, { tool: refusal.toolNamed ? undefined : '{tool}' });
+    case 'tool_needed':
+      // The claim the refused call made stands.
+      return skillResumeLiteral(invocation, refusal.run, { ...refusal.answers, noJudge: refusal.answers.judge === false, confirmed: refusal.confirmed, tool: '{tool}' });
     case 'not_owner':
     case 'run_not_found':
       return skillResumeLiteral(invocation, refusal.run, { claim: true, tool: context.tool });
@@ -250,15 +255,21 @@ function refusalMessage(refusal: Refusal, local: { invocation: Invocation; tool?
       return `Workflow ${refusal.name} must run with the local driver. ${refusal.reason} Ask the person to run ${literal} in their own terminal.`;
     }
     case 'confirm_needed': {
-      const lacks = refusal.missing.map((answer) => ({ confirmed: '--confirmed, the person\'s yes', inputs: '--inputs', parallel: '--parallel', hitl: '--hitl or --auto-approve' })[answer]);
+      const lacks = refusal.missing.map((answer) => ({
+        confirmed: '--confirmed, the person\'s yes', inputs: '--inputs', parallel: '--parallel', hitl: '--hitl or --auto-approve', tool: '--tools default=<tool>, the tool this coding session works in',
+      })[answer]);
       const said = [
         ...(lacks.length > 0 ? [`it needs ${lacks.join(', ')}`] : []),
         ...(refusal.outOfRange ? [`--parallel ${refusal.outOfRange.parallel} is above the most this machine runs at once, ${refusal.outOfRange.ceiling}`] : []),
       ];
-      return `Start ${refusal.name} from its describe reply: ${said.join('; ')}. Run the describe literal and ask the person.`;
+      // The tool is the agent's own answer, which describe asks it for.
+      const act = refusal.missing.some((answer) => answer !== 'tool') || refusal.outOfRange ? 'Run the describe literal and ask the person.' : 'Run the describe literal.';
+      return `Start ${refusal.name} from its describe reply: ${said.join('; ')}. ${act}`;
     }
     case 'not_skill_run':
-      return `Run ${refusal.run} is not driven by the skill driver on this machine. Ask the person whether to continue it from this session, and run the command in next only when they agree: it takes the run over from the machine that last drove it. The person can instead continue it in a terminal with ${resumeLiteral(local.invocation, refusal.run, { tool: local.tool })}.${refusal.toolNamed ? '' : ' This coding session names no tool: add --tools default=<tool>, the tool it works in, to the command in next.'}`;
+      return `Run ${refusal.run} is not driven by the skill driver on this machine. Ask the person whether to continue it from this session, and run the command in next only when they agree: it takes the run over from the machine that last drove it. The person can instead continue it in a terminal with ${resumeLiteral(local.invocation, refusal.run, { tool: local.tool })}.`;
+    case 'tool_needed':
+      return `Run ${refusal.run} needs the tool this coding session works in, for the models of its steps or its judging, and it names none.`;
     case 'not_owner':
       return `Run ${refusal.run} is owned by ${refusal.owner}, who claimed it at ${refusal.since}. Ask the person whether that install is done with it, and run the command in next only when they agree to take it from there; otherwise the run goes on there.`;
     case 'run_not_found':
@@ -268,7 +279,7 @@ function refusalMessage(refusal: Refusal, local: { invocation: Invocation; tool?
     case 'choice_pending':
       return `Run ${refusal.run} waits for the host question. Run the next literal, then the run of the option that fits your host.`;
     case 'unknown_choice':
-      return `Run ${refusal.run} asks no host question now: its host is already chosen, or it has no prompt step. Run the next literal to see the run.`;
+      return `Run ${refusal.run} asks no host question now: its host is already chosen, or nothing in it needs a child agent. Run the next literal to see the run.`;
     case 'unknown_offer':
       return `Attempt ${refusal.attempt} of run ${refusal.run} has no dispatch to ack. Run the next literal to see the run.`;
     case 'unknown_attempt':

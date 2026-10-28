@@ -1008,7 +1008,7 @@ steps:
     roots.push(harness.root);
     expect(await harness.call({ kind: 'describe', name: 'review' })).toMatchObject({ data: { describe: {
       judging: { kind: 'elsewhere', reason: 'This coding session names no tool.' },
-      ask: { say: '- This coding session names no tool for its prompt steps and judging: describe the workflow again with --tools default=<tool>, the tool it works in, and start it from that reply.\n- review is not judged on this machine. This coding session names no tool.' },
+      ask: { kind: 'tool', describe: "teamai workflow start --describe review --driver skill --tools default='{tool}'" },
     } } });
   });
 
@@ -1016,39 +1016,53 @@ steps:
     const harness = await skillHarness({ review: REVIEW.replace('    scorers: [review-quality]', '    model: claude-opus-4-1') }, { tool: null });
     roots.push(harness.root);
     expect(await harness.call({ kind: 'describe', name: 'review' })).toMatchObject({ data: { describe: { judging: { kind: 'none' }, ask: {
-      kind: 'start', say: expect.stringContaining('- This coding session names no tool for its prompt steps and judging: describe the workflow again with --tools default=<tool>, the tool it works in, and start it from that reply.'),
+      kind: 'tool', describe: "teamai workflow start --describe review --driver skill --tools default='{tool}'",
     } } } });
   });
 
-  it('tells a session whose host names no tool to name it on the resume of a run it does not drive', async () => {
+  it('gives a session whose host names no tool a resume of a run it does not drive with a {tool} slot to fill', async () => {
     const harness = await skillHarness({ check: CHECK }, { tool: null });
     roots.push(harness.root);
     const other = await harness.context.client.start('check', { checkout: harness.work, caller: { evidence: { kind: 'none' }, confirmed: false, mode: 'attended' } });
     if (!('data' in other) || typeof other.data.run !== 'string') throw new Error(JSON.stringify(other));
     const run = RunIdSchema.parse(other.data.run);
-    expect(await harness.call({ kind: 'next', run, wait: false })).toMatchObject({ error: {
-      code: 'not_skill_run', message: expect.stringMatching(/ This coding session names no tool: add --tools default=<tool>, the tool it works in, to the command in next\.$/), next: `teamai workflow resume ${run} --driver skill`,
-    } });
+    expect(await harness.call({ kind: 'next', run, wait: false })).toMatchObject({ error: { code: 'not_skill_run', next: `teamai workflow resume ${run} --driver skill --tools default='{tool}'` } });
   });
 
-  it('a step that needs a model fails in a session whose host names no tool, and says how to name it', async () => {
+  it('refuses a start that needs a tool this session does not name, pointing at the describe that asks for it', async () => {
+    const harness = await skillHarness({ review: REVIEW, check: CHECK }, { scorers: { 'review-quality': REVIEW_QUALITY }, tool: null });
+    roots.push(harness.root);
+    expect(await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined })).toEqual({ error: {
+      code: 'confirm_needed',
+      message: 'Start review from its describe reply: it needs --tools default=<tool>, the tool this coding session works in. Run the describe literal.',
+      next: 'teamai workflow start --describe review --driver skill',
+    } });
+    // A run of commands alone needs no tool, and neither does a scored step that pins no model, once judging is off.
+    expect(await harness.call({ kind: 'start', name: 'check', answers: { confirmed: false }, inputs: undefined })).toMatchObject({ data: { turn: { status: 'driving' } } });
+    expect(await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false, judge: false }, inputs: undefined })).toMatchObject({ data: { turn: { status: 'driving' } } });
+  });
+
+  it('a step that needs a model fails once a session whose host names no tool takes the run over, and says how to name it', async () => {
     const harness = await skillHarness({ review: REVIEW.replace('    prompt: Review the change.', '    prompt: Review the change.\n    model: claude-opus-4-1') }, { tool: null });
     roots.push(harness.root);
-    const started = await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined });
+    const started = await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined, tool: 'claude' });
     if (!('data' in started) || !('turn' in started.data)) throw new Error(JSON.stringify(started));
-    expect(await harness.call({ kind: 'choose', run: RunIdSchema.parse(started.data.turn.run), choice: 'h1' })).toMatchObject({ data: { turn: { events: expect.arrayContaining([{
+    const run = RunIdSchema.parse(started.data.turn.run);
+    expect(await harness.call({ kind: 'takeover', run, confirmed: false }, { session: undefined })).toMatchObject({ data: { turn: { run } } });
+    expect(await harness.call({ kind: 'choose', run, choice: 'h1' }, { session: undefined })).toMatchObject({ data: { turn: { events: expect.arrayContaining([{
       kind: 'settled', step: 'review', outcome: 'failed', failure: { code: 'model_unavailable', message: 'Step "review" needs model claude-opus-4-1, and this coding session names no tool to resolve it for: start or resume the workflow with --tools default=<tool>, the tool it works in.' },
     }]) } } });
   });
 
-  it('a resume that names the tool gives it to a run started without one, and its steps then resolve their model for it', async () => {
+  it('a resume that names the tool gives it back to a run a session with no tool took over, and its steps then resolve their model for it', async () => {
     const harness = await skillHarness({ review: REVIEW.replace('    prompt: Review the change.', '    prompt: Review the change.\n    model: claude-opus-4-1') }, { tool: null });
     roots.push(harness.root);
-    const started = await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined });
+    const started = await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined, tool: 'claude' });
     if (!('data' in started) || !('turn' in started.data)) throw new Error(JSON.stringify(started));
     const run = RunIdSchema.parse(started.data.turn.run);
-    expect(await harness.call({ kind: 'resume', run, claim: false, confirmed: false, answers: {}, tool: 'claude' })).toMatchObject({ data: { turn: { run } } });
-    expect(await harness.call({ kind: 'choose', run, choice: 'h1' })).toMatchObject({ data: { turn: { actions: [{ kind: 'dispatch', model: { by: 'step', name: 'claude-opus-4-1' } }] } } });
+    expect(await harness.call({ kind: 'takeover', run, confirmed: false }, { session: undefined })).toMatchObject({ data: { turn: { run } } });
+    expect(await harness.call({ kind: 'resume', run, claim: false, confirmed: false, answers: {}, tool: 'claude' }, { session: undefined })).toMatchObject({ data: { turn: { run } } });
+    expect(await harness.call({ kind: 'choose', run, choice: 'h1' }, { session: undefined })).toMatchObject({ data: { turn: { actions: [{ kind: 'dispatch', model: { by: 'step', name: 'claude-opus-4-1' } }] } } });
   });
 
   it('a session that comes to own a run its starter left unowned works in its own tool, which the steps it prepares resolve their model for', async () => {
@@ -1058,6 +1072,17 @@ steps:
     if (!('data' in started) || !('turn' in started.data)) throw new Error(JSON.stringify(started));
     const run = RunIdSchema.parse(started.data.turn.run);
     expect(await harness.call({ kind: 'choose', run, choice: 'h1' }, { session: 'session-b', tool: 'claude' }))
+      .toMatchObject({ data: { turn: { actions: [{ kind: 'dispatch', model: { by: 'step', name: 'claude-opus-4-1' } }] } } });
+  });
+
+  it('a resume that names a tool replaces the one the run had, so a session that moved to another tool works in its own', async () => {
+    const harness = await skillHarness({ review: REVIEW.replace('    prompt: Review the change.', '    prompt: Review the change.\n    model: claude-opus-4-1') }, { tool: null });
+    roots.push(harness.root);
+    const started = await harness.call({ kind: 'start', name: 'review', answers: { confirmed: false }, inputs: undefined, tool: 'pi' }, { session: undefined });
+    if (!('data' in started) || !('turn' in started.data)) throw new Error(JSON.stringify(started));
+    const run = RunIdSchema.parse(started.data.turn.run);
+    expect(await harness.call({ kind: 'resume', run, claim: false, confirmed: false, answers: {}, tool: 'claude' }, { session: undefined })).toMatchObject({ data: { turn: { run } } });
+    expect(await harness.call({ kind: 'choose', run, choice: 'h1' }, { session: undefined }))
       .toMatchObject({ data: { turn: { actions: [{ kind: 'dispatch', model: { by: 'step', name: 'claude-opus-4-1' } }] } } });
   });
 
@@ -1113,6 +1138,19 @@ steps:
     expect(chosen).toMatchObject({ data: { turn: { events: expect.arrayContaining([{ kind: 'judging-off', failure: { code: 'no_child_agent', message: expect.any(String) } }]) } } });
     expect(done).toMatchObject({ data: { turn: { status: 'done', actions: [{ kind: 'done', outcome: 'succeeded' }] } } });
     expect(done).not.toHaveProperty(['data', 'turn', 'actions', 0, 'score']);
+  });
+
+  it('a run of commands alone that its session judges asks the host question for its judging alone: h4 turns judging off, and its steps still run in a new worktree', async () => {
+    const build = 'schemaVersion: v1alpha1\nname: build\ndescription: Build\ninvoke: allow\nsteps:\n  - id: edit\n    workspace: new\n    command: node -e "require(\'fs\').writeFileSync(\'built.txt\', \'1\')"\n';
+    const gated = 'schemaVersion: v1alpha1\nname: gated\ndescription: Build, scored\ninvoke: allow\nsteps:\n  - id: built\n    workflow: build\n    scorers: [review-quality]\n';
+    const harness = await skillHarness({ build, gated }, { scorers: { 'review-quality': REVIEW_QUALITY }, tool: 'pi' });
+    roots.push(harness.root);
+    const started = await harness.call({ kind: 'start', name: 'gated', answers: { confirmed: false }, inputs: undefined });
+    expect(started).toMatchObject({ data: { turn: { actions: [{ kind: 'choose', about: 'host' }] } } });
+    if (!('data' in started) || !('turn' in started.data)) throw new Error(JSON.stringify(started));
+    const run = RunIdSchema.parse(started.data.turn.run);
+    expect(await harness.call({ kind: 'choose', run, choice: 'h4' })).toMatchObject({ data: { turn: { events: expect.arrayContaining([{ kind: 'judging-off', failure: { code: 'no_child_agent', message: expect.any(String) } }]) } } });
+    await eventsToDone(harness, run);
   });
 
   it('a run started without judging reaches done without the score --next of the session\'s own judge', async () => {

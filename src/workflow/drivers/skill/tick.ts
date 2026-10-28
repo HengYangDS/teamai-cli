@@ -16,8 +16,8 @@ import {
   ackLiteral, adoptLiteral, chooseHostLiteral, nextLiteral, pollLiteral, reportLiteral, respondLiteral, resumeLiteral, skillResumeLiteral, takeoverLiteral, unavailableLiteral, type Invocation,
   type Literal,
 } from './literals.js';
-import { attendedReason, ceilingOf, localPromptTool, localReason } from './preflight.js';
-import { drivesRun, newSkillState, readSkillState, writeSkillState, type AttemptState, type ReportBody, type SkillState, type TurnEvent } from './skill-state.js';
+import { attendedReason, ceilingOf, localPromptTool, localReason, needsTool } from './preflight.js';
+import { drivesRun, newSkillState, readSkillState, removeSkillState, writeSkillState, type AttemptState, type ReportBody, type SkillState, type TurnEvent } from './skill-state.js';
 import {
   ackRow, adoptRow, callRow, cancelledRow, chooseRow, doneRow, gateCheckRow, graceRow, hasSlot, heldProbeRow, invokeRow, judgeFreeRow, judgeTickRow, lockBusyRow, pollRow, readiedRow, reopenedRow, replyRow,
   reportCallRow, reportedRow, reportRow, resendRow, respondedRow, runnerFreeRow, scoreReplyRow, tickRow, turnRow, unattendedRow, unqueueRow, unseenEvents, type Answer,
@@ -266,6 +266,7 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
   }
   const state = read.kind === 'found' ? read.state : undefined;
   const answers = input.resume?.answers ?? {};
+  const confirmed = input.resume?.confirmed ?? input.takeover?.confirmed ?? false;
   if (context.mode === 'unattended' && (input.resume !== undefined || input.takeover)) {
     // Nobody is there to take a run that needs a person or the local driver over from here, so it is refused before the
     // claim, which would leave this install owning it, and before a takeover makes this session its orchestrator.
@@ -276,7 +277,7 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
     const attended = carried ? attendedReason(carried.description, 'continue', new Set(carried.settled)) : undefined;
     if (carried && (local !== undefined || attended !== undefined)) {
       const readied: RunReadied = { kind: 'ready', installed: false, description: carried.description, settled: carried.settled, judging: { kind: 'none' } };
-      const refused = traced(context, readiedRow({ run, readied, kept: false, mode: context.mode, ...(local !== undefined ? { local } : {}), ...(attended !== undefined ? { attended } : {}), answers }));
+      const refused = traced(context, readiedRow({ run, readied, kept: false, mode: context.mode, ...(local !== undefined ? { local } : {}), ...(attended !== undefined ? { attended } : {}), needsTool: false, answers, confirmed }));
       if (refused && 'answer' in refused) return { answer: { error: errorOf(refused.answer, { invocation: context.invocation, same, localTool }) } };
     }
   }
@@ -288,9 +289,15 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
     const local = readied.kind === 'ready' ? localReason(readied.description) : undefined;
     const attended = readied.kind === 'ready' && context.mode === 'unattended' ? attendedReason(readied.description, 'continue', new Set(readied.settled)) : undefined;
     const taken = traced(context, readiedRow({
-      run, readied, kept: state !== undefined, mode: context.mode, ...(local !== undefined ? { local } : {}), ...(attended !== undefined ? { attended } : {}), answers,
+      run, readied, kept: state !== undefined, mode: context.mode, ...(local !== undefined ? { local } : {}), ...(attended !== undefined ? { attended } : {}), answers, confirmed,
+      needsTool: readied.kind === 'ready' && needsTool(readied.description, { tool: context.tool, judged: answers.judge !== false }),
     }));
-    if (taken && 'answer' in taken) return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, localTool, tool: input.resume?.tool }) } };
+    if (taken && 'answer' in taken) {
+      // R28 with a skill.json kept here comes after the resume installed the published run over it, which made it stale: the
+      // resume its next names must ready the run anew, as R19 would have.
+      if (taken.row === 'R28' && state !== undefined) await removeSkillState(context.config, lock);
+      return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, localTool, tool: input.resume?.tool }) } };
+    }
     if (taken) {
       return { state: plannedState(context, run, taken.start) };
     }
@@ -298,7 +305,7 @@ async function called(context: SkillContext, lock: RunLock, same: Literal, input
   const unattended = state && context.mode === 'unattended' && (input.resume !== undefined || input.takeover) ? traced(context, unattendedRow(state, answers)) : undefined;
   const kept = unattended?.state ?? state;
   if (kept && input.report !== undefined && traced(context, reportCallRow(kept, input.report))) return { state: kept };
-  const taken = traced(context, callRow(kept, { run, session: context.session, tool: context.tool, at: context.now().toISOString(), takeover: input.takeover !== undefined }));
+  const taken = traced(context, callRow(kept, { run, session: context.session, tool: context.tool, declared: input.resume?.tool, at: context.now().toISOString(), takeover: input.takeover !== undefined }));
   if ('answer' in taken) return { answer: { error: errorOf(taken.answer, { invocation: context.invocation, same, run, localTool }) } };
   return { state: taken.state };
 }
