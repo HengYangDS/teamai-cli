@@ -63,6 +63,42 @@ steps:
     command: node -e "console.log('ship')"
 `;
 
+const SIGN = `schemaVersion: v1alpha1
+name: sign
+description: Build, then sign with the release key.
+steps:
+  - id: build
+    command: node -e "console.log('build')"
+  - id: sign
+    needs: [build]
+    requires: { env: [SIGNING_KEY] }
+    command: node -e "console.log('signed')"
+`;
+
+const SIGNED_RELEASE = `schemaVersion: v1alpha1
+name: signed-release
+description: Sign, then ship once a person approves.
+steps:
+  - id: sign
+    requires: { env: [SIGNING_KEY] }
+    command: echo signed
+  - id: ship
+    needs: [sign]
+    approve: { message: Ship it?, required: true }
+    command: echo ship
+`;
+
+const DOCS = `schemaVersion: v1alpha1
+name: docs
+description: Build, then write the release notes.
+steps:
+  - id: build
+    command: echo build
+  - id: notes
+    needs: [build]
+    prompt: Write the release notes.
+`;
+
 const REVIEW = `schemaVersion: v1alpha1
 name: review
 description: Review the project twice in one session.
@@ -448,6 +484,9 @@ describe('workflow resume lists the runs a checkout can resume, and --next takes
       'teamai.yaml': `team: acme\nrepo: ${TEAM_URL}\nprovider: github\n`,
       'workflows/quick.yaml': QUICK,
       'workflows/release.yaml': RELEASE,
+      'workflows/sign.yaml': SIGN,
+      'workflows/docs.yaml': DOCS,
+      'workflows/signed-release.yaml': SIGNED_RELEASE,
     }, 'team repo', teamOrigin);
     seed(path.join(sandbox, 'seed-business'), { 'README.md': '# business\n' }, 'business repo', businessOrigin);
     await join('alice');
@@ -507,6 +546,83 @@ describe('workflow resume lists the runs a checkout can resume, and --next takes
     expect(rowsOf(alices)).toEqual(expect.arrayContaining([
       expect.stringMatching(new RegExp(`^${quick} +quick +succeeded +${OWNER('runner')} +ended on teamai-reports: teamai workflow resume ${quick} --claim brings how it ended here$`)),
       expect.stringMatching(new RegExp(`^${release} +release +running +this install +local, offered on teamai-reports: teamai workflow resume ${release}$`)),
+    ]));
+  }, 180_000);
+
+  it('leaves a run that needs a person to an attended --next with no terminal, where nobody could answer it', async () => {
+    const release = await offer('release');
+
+    const idle = await teamai('runner', ['workflow', 'resume', '--next'], { env: { TEAMAI_MODE: 'attended' } });
+    expect(idle.code, said(idle)).toBe(0);
+    expect(idle.envelope()).toMatchObject({ data: { idle: { offered: expect.any(Number) } } });
+    expect(idle.stderr).not.toContain(`Claimed ${release}`);
+    expect(publishedState(release)).toMatchObject({ status: 'running', offered: { at: expect.any(String) } });
+  }, 180_000);
+
+  it('leaves a run whose steps left require env the runner has no value for, lists why, and takes it once the value is there', async () => {
+    const sign = await offer('sign');
+    const unattended = { TEAMAI_MODE: 'unattended' };
+
+    const listed = await teamai('runner', ['workflow', 'resume'], { env: unattended });
+    expect(listed.code, said(listed)).toBe(0);
+    expect(rowsOf(listed)).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^${sign} +sign +cannot run here +${OWNER('alice')} +offered on teamai-reports, sign requires env SIGNING_KEY, which has no value here: teamai env set SIGNING_KEY, or set it in the environment; then teamai workflow resume --next$`)),
+    ]));
+
+    const idle = await teamai('runner', ['workflow', 'resume', '--next'], { env: unattended });
+    expect(idle.code, said(idle)).toBe(0);
+    expect(idle.envelope()).toMatchObject({ data: { idle: { offered: expect.any(Number) } } });
+    expect(idle.stderr).toContain(`Left ${sign} (sign) offered: sign requires env SIGNING_KEY, which has no value here: teamai env set SIGNING_KEY, or set it in the environment`);
+    expect(publishedState(sign)).toMatchObject({ status: 'running', offered: { at: expect.any(String) } });
+
+    const taken = await teamai('runner', ['workflow', 'resume', '--next'], { env: { ...unattended, SIGNING_KEY: 'test-key' } });
+    expect(taken.code, said(taken)).toBe(0);
+    expect(taken.stderr).toContain(`Claimed ${sign} (sign) from alice`);
+    expect(taken.envelope()).toMatchObject({ data: { done: { run: sign, outcome: 'succeeded' } } });
+  }, 180_000);
+
+  it('leaves a run whose prompt steps left run on a tool not on PATH, lists why, and takes it once the tool is there', async () => {
+    const docs = await offer('docs');
+    // Only git, and the system's own commands: no agent tool, whatever this machine has installed.
+    const bin = path.join(homeOf('runner'), 'tool-bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), path.join(bin, 'git'));
+    const runner = { TEAMAI_MODE: 'unattended', PATH: [bin, '/usr/bin', '/bin'].join(path.delimiter) };
+    const claude = ['--tools', 'default=claude'];
+
+    const listed = await teamai('runner', ['workflow', 'resume', ...claude], { env: runner });
+    expect(listed.code, said(listed)).toBe(0);
+    expect(rowsOf(listed)).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^${docs} +docs +cannot run here +${OWNER('alice')} +offered on teamai-reports, the prompt step notes run on claude, which is not on PATH here: install claude, or pass --tools default=<tool> for one that is; then teamai workflow resume --next$`)),
+    ]));
+
+    const idle = await teamai('runner', ['workflow', 'resume', '--next', ...claude], { env: runner });
+    expect(idle.code, said(idle)).toBe(0);
+    expect(idle.envelope()).toMatchObject({ data: { idle: { offered: expect.any(Number) } } });
+    expect(idle.stderr).toContain(`Left ${docs} (docs) offered: the prompt step notes run on claude, which is not on PATH here: install claude, or pass --tools default=<tool> for one that is`);
+    expect(publishedState(docs)).toMatchObject({ status: 'running', offered: { at: expect.any(String) } });
+
+    fs.writeFileSync(path.join(bin, 'claude'), [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi',
+      `echo '${JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-sonnet-4' })}'`,
+      `echo '${JSON.stringify({ type: 'result', result: 'done' })}'`,
+      '',
+    ].join('\n'));
+    fs.chmodSync(path.join(bin, 'claude'), 0o755);
+    const taken = await teamai('runner', ['workflow', 'resume', '--next', ...claude], { env: runner });
+    expect(taken.code, said(taken)).toBe(0);
+    expect(taken.stderr).toContain(`Claimed ${docs} (docs) from alice`);
+    expect(taken.envelope()).toMatchObject({ data: { done: { run: docs, outcome: 'succeeded' } } });
+  }, 180_000);
+
+  it('lists a run that needs a person and env with no value here as cannot run here, so no person claims it here', async () => {
+    const signed = await offer('signed-release');
+
+    const listed = await teamai('runner', ['workflow', 'resume']);
+    expect(listed.code, said(listed)).toBe(0);
+    expect(rowsOf(listed)).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^${signed} +signed-release +cannot run here +${OWNER('alice')} +offered on teamai-reports, sign requires env SIGNING_KEY, which has no value here: teamai env set SIGNING_KEY, or set it in the environment; only a person can answer the approval at ship; then a person runs teamai workflow resume ${signed} --claim$`)),
     ]));
   }, 180_000);
 
