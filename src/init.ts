@@ -2,6 +2,7 @@ import YAML from 'yaml';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readWorkspaceChildren } from './workspace-children.js';
+import { readSelfModeMarker } from './bootstrap.js';
 import { hasUserScopeInstall, saveLocalConfig, loadTeamConfig, saveLocalConfigForScope, loadLocalConfigForScope, loadStateForScope, refreshRoleAssignment, saveStateForScope, resolveProjectDataHome } from './config.js';
 import { codexTrustPolicy, deliveredHookFiles, describeUnappliedTeamHooks, hasTeamaiHooks, reconcileHooks, reconcileTeamHooksForConfig, reportCodexTrust, trustCodexForScope } from './hooks.js';
 import { configureGitUser, resolveAnchors, initRepo, isGitRepo, getRemoteUrl, getConfiguredRemoteUrl, remotesMatch, redactGitCredentials, pullRepoFastForward, DetachedTeamRepoError, pushRepoDirectly, autoPushViaMR, gitBlockTimeoutMs, createGitWithBlockTimeout } from './utils/git.js';
@@ -1679,6 +1680,19 @@ function guideWebCreation(kind: string, name: string, url: string | null): void 
   }
 }
 
+/**
+ * Detect whether `repoDir` is a single-repo team repository (`.teamai/teamai.yaml`
+ * with `mode: self` on its default branch and no root `teamai.yaml`). Initializing
+ * against its remote URL as a standalone team repo would push a default skeleton
+ * to the business repo's main branch (#1500).
+ */
+export async function isSingleRepoTeam(repoDir: string): Promise<boolean> {
+  if (await pathExists(path.join(repoDir, 'teamai.yaml'))) {
+    return false;
+  }
+  return (await readSelfModeMarker(repoDir)) !== null;
+}
+
 export async function init(options: GlobalOptions & {
   repo?: string;
   repoPositional?: string;
@@ -1985,7 +1999,8 @@ export async function init(options: GlobalOptions & {
     log.info(`Clone path: ${localPath}`);
   }
 
-  if (!await pathExists(localPath)) {
+  const clonedThisRun = !await pathExists(localPath);
+  if (clonedThisRun) {
     await settleReplacedInstall();
 
     const cloneSpin = (await spinner('Cloning team repo...')).start();
@@ -2084,6 +2099,19 @@ export async function init(options: GlobalOptions & {
         process.exit(1);
       }
     }
+  }
+
+  // Refuse to initialize a single-repo team as a standalone team repo (#1500).
+  if (await isSingleRepoTeam(localPath)) {
+    if (clonedThisRun) {
+      await remove(localPath);
+    }
+    log.error(
+      `${repoInput} is a single-repo team: its config is .teamai/teamai.yaml. ` +
+        'Clone the repository and run `teamai init --self` in it.',
+    );
+    process.exit(1);
+    return;
   }
 
   // Step 3.5: Configure git user for the team repo
