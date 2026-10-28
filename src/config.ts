@@ -22,7 +22,7 @@ import {
   type MemberSettings,
   type MemberWorkflowSettings,
 } from './types.js';
-import { readFileSafe, readJson, writeFileAtomic, writeJsonAtomic, expandHome, pathExists } from './utils/fs.js';
+import { readFileIfExists, readFileSafe, readJson, writeFileAtomic, writeJsonAtomic, expandHome, pathExists } from './utils/fs.js';
 import { nearestGitEntry, resolveAnchors } from './utils/git.js';
 import { getUserHome } from './utils/home.js';
 import { resolvePartitionDir, writeAnchorFile } from './utils/partition.js';
@@ -389,6 +389,35 @@ export async function loadMemberSettings(configPath = expandHome(getUserConfigPa
   return MemberSettingsSchema.parse(settings);
 }
 
+/**
+ * What is wrong with `workflows.allow` in ~/.teamai/config.yaml, or undefined. Another bad machine value is skipped
+ * with a warning, but skipping a restriction lifts it, so a workflow command refuses to run on this one, and on a
+ * file it cannot read or parse, whose restrictions are unknown.
+ */
+export async function machineWorkflowAllowProblem(): Promise<string | undefined> {
+  const configPath = expandHome(getUserConfigPath());
+  let content: string | null;
+  try {
+    content = await readFileIfExists(configPath);
+  } catch (e) {
+    return `${configPath} could not be read (${describeConfigError(e)}), so the workflows.allow restrictions it may set are unknown. `
+      + 'A workflow does not run until it is fixed.';
+  }
+  if (!content) return undefined;
+  let workflows: Record<string, unknown> | undefined;
+  try {
+    workflows = asRecord(asRecord(YAML.parse(content))?.workflows);
+  } catch (e) {
+    return `${configPath} is not valid YAML (${describeConfigError(e)}), so the workflows.allow restrictions it may set are unknown. `
+      + 'A workflow does not run until it is fixed.';
+  }
+  if (!workflows || !Object.prototype.hasOwnProperty.call(workflows, 'allow')) return undefined;
+  const parsed = AllowSchema.safeParse(workflows.allow);
+  if (parsed.success) return undefined;
+  return `workflows.allow in ${configPath} is not valid: ${describeConfigError(parsed.error)}. `
+    + 'A workflow does not run while a restriction it sets may be lifted. Fix or remove it.';
+}
+
 /** Overlay the machine settings below a workspace/self config and remember that config's own values for a later save. */
 function applyMachineSettings(config: LocalConfig, machine: MemberSettings): LocalConfig {
   if (config.scope === 'user' || config.memberSettingsOverlay) return config;
@@ -427,6 +456,14 @@ async function applyConfigOverlays(config: LocalConfig): Promise<LocalConfig> {
   const assigned = await applyRoleAssignment(config);
   if (assigned.scope === 'user') return assigned;
   return applyMachineSettings(assigned, await loadMemberSettings());
+}
+
+/**
+ * The member settings `config`'s own file sets, without the machine's overlaid below them. A config with no overlay
+ * holds only its own, which its load already validated.
+ */
+export function ownMemberSettings(config: LocalConfig): MemberSettings {
+  return config.memberSettingsOverlay?.local ?? config;
 }
 
 /** Mark settings a command deliberately wrote, so a later save keeps them even when they equal a machine value. */
@@ -480,30 +517,6 @@ async function readAiSetting(configPath: string): Promise<LocalConfig['ai']> {
     log.warn(`Ignoring ai.tool: ${configPath} is not valid YAML (${describeConfigError(e)}).`);
   }
   return undefined;
-}
-
-/** `ai.tool` as one level sets it: the current scope's own config (`project`) or ~/.teamai/config.yaml (`machine`). */
-export interface AiToolSetting {
-  level: 'project' | 'machine';
-  tool: string;
-  /** The file it is set in, which a message tells the member to change. */
-  file: string;
-}
-
-/**
- * The `ai.tool` settings that apply in `scope`, the project's first: its own config when it is a project, self or
- * workspace install, then ~/.teamai/config.yaml. Without a scope, or in user scope, only the machine's.
- */
-export async function aiToolSettings(scope: LocalConfig | undefined): Promise<AiToolSetting[]> {
-  const machine = expandHome(getUserConfigPath());
-  const project = scope && scope.scope !== 'user' ? path.join(getDataHome(scope), 'config.yaml') : undefined;
-  const levels = [...(project && project !== machine ? [{ level: 'project' as const, file: project }] : []), { level: 'machine' as const, file: machine }];
-  const settings: AiToolSetting[] = [];
-  for (const { level, file } of levels) {
-    const tool = (await readAiSetting(file))?.tool;
-    if (tool) settings.push({ level, tool, file });
-  }
-  return settings;
 }
 
 /**

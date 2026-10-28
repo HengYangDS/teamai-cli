@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { z } from 'zod';
-import { autoDetectInit, loadLocalConfigForScope, loadTeamConfig } from './config.js';
+import { autoDetectInit, loadLocalConfigForScope, loadTeamConfig, machineWorkflowAllowProblem } from './config.js';
 import { resolveWorkflowEnv, type WorkflowEnv } from './env-resolution.js';
 import { isLeaseRef } from './scorers/entry.js';
 import { log, setStderrOnly } from './utils/logger.js';
@@ -108,8 +108,19 @@ function readJson(payload: string | undefined, missing: string): JsonRead {
  */
 interface Ready { config: LocalConfig; teamConfig: TeamaiConfig; env: WorkflowEnv; secrets: Record<string, string> }
 
+/**
+ * The refusal of every workflow command while this machine's `workflows.allow` cannot be used: skipping a restriction
+ * would lift it. Undefined when it can.
+ */
+async function allowRefusal(): Promise<WorkflowEnvelope | undefined> {
+  const problem = await machineWorkflowAllowProblem();
+  return problem ? { error: { code: 'not_initialized', message: problem } } : undefined;
+}
+
 /** The member's config as `Ready`, or the failure the caller prints. */
 async function readyConfig(): Promise<Ready | WorkflowEnvelope> {
+  const refusal = await allowRefusal();
+  if (refusal) return refusal;
   const loaded = await loadConfig();
   if (!('config' in loaded)) return loaded;
   const env = await resolveWorkflowEnv(loaded.config);
@@ -133,6 +144,8 @@ async function readyStartConfig(name: string): Promise<Ready | WorkflowEnvelope>
 
 /** `allowRemote`: a run no config here has is the current config's, as a call that may claim it from teamai-reports needs. */
 async function runOwner(runId: string, { allowRemote }: { allowRemote: boolean }): Promise<{ config: LocalConfig; teamConfig: TeamaiConfig } | WorkflowEnvelope> {
+  const refusal = await allowRefusal();
+  if (refusal) return refusal;
   const current = await loadConfig(true);
   const found = await findRunConfig(runId, 'config' in current ? current.config : undefined);
   if (!('config' in found)) {

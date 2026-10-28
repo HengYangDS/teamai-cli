@@ -2,11 +2,11 @@ import YAML from 'yaml';
 import { hookToolPathsForConfig } from './types.js';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { detectProjectConfig, loadLocalConfig, loadMemberSettings, loadTeamConfig } from './config.js';
+import { detectProjectConfig, hasUserScopeInstall, loadLocalConfig, loadMemberSettings, loadTeamConfig, ownMemberSettings } from './config.js';
 import { memberTools } from './tool-launch/call.js';
 import { AgentSession } from './session-flow/agent-session.js';
 import { SessionPolicy, type SessionPolicy as Policy } from './session-flow/session-policy.js';
-import { explainRunMode, RUN_MODES, type ExplainedRunMode } from './launch-context.js';
+import { explainRunMode, RUN_MODES, type ExplainedRunMode, type RunMode } from './launch-context.js';
 import { scoringUnavailable } from './scorers/home.js';
 import { scopeScoring } from './scorers/settings.js';
 import { readWorkspaceChildren } from './workspace-children.js';
@@ -38,6 +38,7 @@ import {
   type LocalConfig,
   type TeamaiConfig,
   installScopeName,
+  MemberSettingsSchema,
 } from './types.js';
 import { hookSettingsFile, installOf, isInstalledFor, locate, ownOf, writable, type Gate, type Install } from './locate.js';
 import { samePlace } from './resources/places.js';
@@ -177,7 +178,8 @@ export interface DoctorReport {
   memberSettings?: MemberSettingsReport[];
 }
 
-export type MemberSettingLevel = 'environment' | 'scope' | 'machine' | 'team' | 'default';
+/** `http-team`: an HTTP team repo, which keeps no session archive, so it turns session publishing off whatever a level sets. */
+export type MemberSettingLevel = 'environment' | 'scope' | 'machine' | 'team' | 'http-team' | 'default';
 
 export interface MemberSettingSource {
   level: MemberSettingLevel;
@@ -195,6 +197,41 @@ export interface MemberSettingsReport {
   levels: MemberSettingSource[];
 }
 
+/** A level as doctor's text names it: where a value came from, and its short name among the levels below. */
+function describeMemberSettingLevel({ level, file, variable }: MemberSettingSource, scope: LocalConfig['scope']): { from: string; short: string } {
+  switch (level) {
+    case 'environment': return { from: variable ?? 'the environment', short: variable ?? 'environment' };
+    // This machine's config is the user scope's: this scope's own in user scope, and in a workspace the one that holds
+    // a setting the user scope decides for the whole machine.
+    case 'scope': return file === path.join(getTeamaiHomeDir(), 'config.yaml')
+      ? { from: `the user config ${file}${scope === 'user' ? ", also this machine's" : ''}`, short: 'user config' }
+      : { from: `the workspace config ${file}`, short: 'workspace' };
+    case 'machine': return { from: `the machine config ${file}`, short: 'machine' };
+    case 'team': return { from: "the team's teamai.yaml", short: 'team' };
+    case 'http-team': return { from: 'the HTTP team repo, which keeps no session archive', short: 'HTTP team repo' };
+    case 'default': return { from: 'the default', short: 'default' };
+    default: {
+      const unhandled: never = level;
+      return unhandled;
+    }
+  }
+}
+
+/** Doctor's `Member settings` lines: each setting some level sets, its value in effect, the level that won, and the values below it. */
+function memberSettingLines(reports: MemberSettingsReport[], scope: LocalConfig['scope']): string[] {
+  const shown = (value: unknown): string => typeof value === 'string' ? value : JSON.stringify(value);
+  return reports.flatMap(({ key, effective, source, levels }) => {
+    if (!source || (source.level === 'default' && levels.every(({ used }) => used !== false))) return [];
+    const below = levels.slice(levels.indexOf(source) + 1).filter(({ level, used }) => level !== 'default' && used !== false)
+      .map((lower, index) => `the ${describeMemberSettingLevel(lower, scope).short}${index === 0 ? ' says' : ''} ${shown(lower.value)}`);
+    // A value set but not read, such as a workspace's own updatePolicy while the user scope decides it.
+    const unused = levels.filter(({ used }) => used === false)
+      .map((ignored) => `the ${describeMemberSettingLevel(ignored, scope).short}'s ${shown(ignored.value)} is not used`);
+    const notes = [...below, ...unused];
+    return [`  ${key}: ${shown(effective)}, from ${describeMemberSettingLevel(source, scope).from}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`];
+  });
+}
+
 const MEMBER_SETTING_REPORT_KEYS = [
   'ai.tool',
   'workflows.tools.default',
@@ -208,9 +245,16 @@ const MEMBER_SETTING_REPORT_KEYS = [
   'coAuthorEnabled',
   'usageReportEnabled',
   'codexTrustEnabled',
+  'sessions.publish.attended',
+  'sessions.publish.unattended',
   'updatePolicy',
   'autoCompactTokens',
 ] as const;
+
+/** The run mode a `sessions.publish.<mode>` report key names. */
+function publishMode(key: string): RunMode | undefined {
+  return RUN_MODES.find((mode) => key === `sessions.publish.${mode}`);
+}
 
 const MACHINE_WIDE_MEMBER_SETTINGS = new Set(['updatePolicy', 'autoCompactTokens']);
 
@@ -296,6 +340,8 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
     if (key === 'autoCompactTokens') return readPath(selectedSharing, ['autoCompact', 'tokens']);
     if (key === 'usageReportEnabled') return selectedTeam?.usageReport;
     if (key === 'updatePolicy') return selectedTeam?.autoUpdate === false ? 'skip' : selectedTeam?.autoUpdate === true ? 'auto' : undefined;
+    const mode = publishMode(key);
+    if (mode) return SessionPolicy.readPublish('teamai.yaml', ctx.teamConfig?.sessions).set[mode]?.policy;
     return undefined;
   };
   const defaultValue = (key: string): unknown => {
@@ -306,9 +352,12 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
     if (key === 'contributeHintEnabled' || key === 'mrHintEnabled' || key === 'usageReportEnabled') return true;
     if (key === 'coAuthorEnabled' || key === 'codexTrustEnabled') return true;
     if (key === 'updatePolicy') return 'auto';
+    const mode = publishMode(key);
+    if (mode) return SessionPolicy.publishDefaults[mode];
     return undefined;
   };
 
+  const publishing = SessionPolicy.publish(ctx.localConfig, ctx.teamConfig).policies;
   const levelsFor = (key: string): MemberSettingSource[] => {
     const parts = reportPathParts(key);
     let scopeValue = readPath(rawScope, parts);
@@ -323,6 +372,13 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
       scopeValue = nonEmptyAiTool(scopeValue);
       machineValue = nonEmptyAiTool(machineValue);
     }
+    const mode = publishMode(key);
+    if (mode) {
+      scopeValue = SessionPolicy.readPublish('config.yaml', readPath(rawScope, ['sessions'])).set[mode]?.policy;
+      machineValue = SessionPolicy.readPublish('config.yaml', machine.sessions).set[mode]?.policy;
+    }
+    // A workspace's own sessions replaces the machine's whole, whatever run modes it sets.
+    const machineShadowed = mode !== undefined && ctx.localConfig.scope !== 'user' && readPath(rawScope, ['sessions']) !== undefined;
     const levels: MemberSettingSource[] = [];
     if (key === 'ai.tool' && process.env.TEAMAI_AI_TOOL) levels.push(settingSource('environment', process.env.TEAMAI_AI_TOOL, undefined, 'TEAMAI_AI_TOOL'));
     if (key === 'recallEnabled' && process.env.TEAMAI_RECALL_DISABLED === '1') levels.push(settingSource('environment', false, undefined, 'TEAMAI_RECALL_DISABLED'));
@@ -330,7 +386,7 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
     if (key === 'mrHintEnabled' && process.env.TEAMAI_MR_HINT_DISABLED === '1') levels.push(settingSource('environment', false, undefined, 'TEAMAI_MR_HINT_DISABLED'));
 
     if (!machineWideUser && scopeValue !== undefined) levels.push(settingSource('scope', scopeValue, scopeSourceFile));
-    if (machineValue !== undefined && ctx.localConfig.scope !== 'user' && !machineWideUser) {
+    if (machineValue !== undefined && ctx.localConfig.scope !== 'user' && !machineWideUser && !machineShadowed) {
       levels.push(settingSource('machine', machineValue, machineFile));
     }
     if (machineWideUser && scopeValue !== undefined) levels.push(settingSource('scope', scopeValue, scopeSourceFile));
@@ -351,6 +407,10 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
       const workspaceValue = readPath(rawScope, parts);
       if (workspaceValue !== undefined) levels.push(settingSource('scope', workspaceValue, scopeFile, undefined, false));
     }
+    if (machineShadowed && machineValue !== undefined) levels.push(settingSource('machine', machineValue, machineFile, undefined, false));
+    if (mode && publishing[mode].source.kind === 'http-team') {
+      return [settingSource('http-team', 'off'), ...levels.map((level) => level.level === 'default' ? level : { ...level, used: false })];
+    }
     return levels;
   };
 
@@ -363,6 +423,8 @@ async function memberSettingsReport(ctx: DoctorContext): Promise<MemberSettingsR
     if (key === 'mrHintEnabled') return isMrHintEnabled(ctx.localConfig, ctx.teamConfig ?? {});
     if (key === 'usageReportEnabled') return isUsageReportEnabled(ctx.localConfig, ctx.teamConfig ?? {});
     if (key === 'coAuthorEnabled') return resolveCoAuthor(ctx.localConfig, ctx.teamConfig ?? {}) ?? true;
+    const mode = publishMode(key);
+    if (mode) return publishing[mode].policy;
     if (key === 'autoCompactTokens') return resolveAutoCompactTokens(decidingConfig, decidingTeam ?? {});
     if (key === 'updatePolicy') {
       const { resolveEffectiveUpdatePolicy } = await import('./update-policy.js');
@@ -741,10 +803,23 @@ function usageReportNote({ localConfig, teamConfig }: DoctorContext): string {
   if (localConfig.repo.kind === 'http') return 'Usage reporting: off, from HTTP mode (no team repo to report to).';
   const member = localConfig.usageReportEnabled;
   const team = teamConfig?.usageReport;
-  const source = member !== undefined ? `usageReportEnabled: ${member} in ${path.join(getDataHome(localConfig), 'config.yaml')}`
+  // A workspace or self config takes the machine's value when its own file sets none.
+  const level = ownMemberSettings(localConfig).usageReportEnabled === undefined ? `the machine config ${path.join(getTeamaiHomeDir(), 'config.yaml')}`
+    : `the ${installScopeName(localConfig.scope)} config ${path.join(getDataHome(localConfig), 'config.yaml')}`;
+  const source = member !== undefined ? `usageReportEnabled: ${member} in ${level}`
     : team !== undefined ? `usageReport: ${team} in the team's teamai.yaml`
     : 'the default';
   return `Usage reporting: ${isUsageReportEnabled(localConfig, teamConfig ?? {}) ? 'on' : 'off'}, from ${source}.`;
+}
+
+/** The keys of a ~/.teamai/config.yaml with no install that no command reads: only its member settings apply. */
+async function machineUnreadKeyNotes(): Promise<string[]> {
+  if (await hasUserScopeInstall()) return [];
+  const machineFile = path.join(getTeamaiHomeDir(), 'config.yaml');
+  const unread = Object.keys(await readYamlObject(machineFile)).filter((key) => !(key in MemberSettingsSchema.shape));
+  return unread.length > 0
+    ? [`Not read from ${machineFile}, which holds no user-scope install so only its member settings apply: ${unread.join(', ')}.`]
+    : [];
 }
 
 /**
@@ -1236,6 +1311,7 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
     ...codexTrust.notes,
     ...toolPathsDroppedKeyNotes(ctx),
     usageReportNote(ctx),
+    ...await machineUnreadKeyNotes(),
     ...SessionPolicy.publish(localConfig, ctx.teamConfig).problems.map((problem) => `${problem}.`),
     ...await unreadSessionToolNotes(ctx),
     // What git sees of the delivered team resources, and what no pull changes (#915).
@@ -1247,13 +1323,14 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
     ...await recordedPlaceNotes(ctx, 'blocks'),
   ];
 
+  const memberSettings = await memberSettingsReport(ctx);
   if (jsonMode) {
     emitReport({
       ok: allPassed,
       scope,
       runMode,
       checks: results,
-      memberSettings: await memberSettingsReport(ctx),
+      memberSettings,
       // pkgDoctorReport renders its own lines; they are human text, not checks.
       ...(packageReport ? { packages: { ok: packageReport.allPassed, lines: packageReport.lines } } : {}),
       ...(notes.length > 0 ? { notes } : {}),
@@ -1263,6 +1340,13 @@ export async function doctor(options: DoctorOptions): Promise<boolean> {
 
   if (packageReport) {
     for (const line of packageReport.lines) console.log(line);
+  }
+
+  const settingLines = memberSettingLines(memberSettings, localConfig.scope);
+  if (settingLines.length > 0) {
+    console.log('');
+    log.info('Member settings:');
+    for (const line of settingLines) console.log(line);
   }
 
   if (notes.length > 0) {

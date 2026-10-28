@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { aiToolSettings, detectProjectConfig } from '../config.js';
+import { loadMemberSettings, ownMemberSettings, resolveConfigForDir } from '../config.js';
 import { LAUNCHED_BY_ENV, resolveRunMode, RUN_MODE_ENV, type LaunchedBy } from '../launch-context.js';
-import { getDataHome, type LocalConfig } from '../types.js';
+import { getDataHome, getUserConfigPath, installScopeName, type LocalConfig } from '../types.js';
 import { resolveCliPath } from '../utils/cli-path.js';
+import { expandHome } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
 import { runTool } from './run.js';
 import type { TokenUsage } from './stdout.js';
@@ -20,6 +21,8 @@ export interface CallOptions {
   /** Who in teamai makes the call, which the launched session carries as `LAUNCHED_BY_ENV`. */
   launchedBy: LaunchedBy;
   timeout?: number;
+  /** The scope the call acts for, when the caller holds it. Without it, the scope of the working directory. */
+  scope?: LocalConfig;
 }
 
 export interface ToolCaller {
@@ -50,21 +53,37 @@ export interface MemberTool {
 /**
  * The tools the member names for `scope`, the most specific first: TEAMAI_AI_TOOL, then `ai.tool` in the scope's own
  * config, then in ~/.teamai/config.yaml. AI calls take the first; a workflow step puts its own settings between them.
+ * Each names the level that sets it, so a message sends the member to the file that does.
  */
 export async function memberTools(scope: LocalConfig | undefined): Promise<MemberTool[]> {
   const env = process.env.TEAMAI_AI_TOOL;
+  // In user scope the scope's own config is this machine's, read as an install.
+  const own = scope && scope.scope !== 'user' ? ownMemberSettings(scope).ai?.tool : undefined;
+  const machine = scope?.scope === 'user' ? scope.ai?.tool : (await loadMemberSettings()).ai?.tool;
   return [
     ...(env ? [{ source: 'TEAMAI_AI_TOOL' as const, tool: env, setting: 'TEAMAI_AI_TOOL' }] : []),
-    ...(await aiToolSettings(scope)).map(({ level, tool, file }) => ({ source: `ai.tool (${level})` as const, tool, setting: `ai.tool in ${file}` })),
+    ...(scope && own ? [{ source: 'ai.tool (project)' as const, tool: own, setting: `ai.tool in the ${installScopeName(scope.scope)} config ${path.join(getDataHome(scope), 'config.yaml')}` }] : []),
+    ...(machine ? [{ source: 'ai.tool (machine)' as const, tool: machine, setting: `ai.tool in the ${scope?.scope === 'user' ? 'user' : 'machine'} config ${expandHome(getUserConfigPath())}` }] : []),
   ];
 }
 
-/** The scope of a command run here, as the command resolves it, read without writing anything. */
+/**
+ * The scope of a command run here, as the command resolves it, read without writing anything. A scope config here that
+ * cannot be read may set the tool, so it fails the call rather than let another level pick one.
+ */
 async function scopeHere(): Promise<LocalConfig | undefined> {
-  return await detectProjectConfig(process.cwd(), undefined, { dryRun: true, suppressMigrationNotice: true }) ?? undefined;
+  const unreadable: string[] = [];
+  const scope = await resolveConfigForDir(process.cwd(), (file, error) => { unreadable.push(`${file} could not be read: ${error}.`); }, { dryRun: true, suppressMigrationNotice: true });
+  if (unreadable.length > 0) {
+    throw new CallError('override_invalid', `${unreadable.join(' ')} teamai cannot tell which ai.tool applies here, so no AI call runs until that is fixed.`);
+  }
+  return scope ?? undefined;
 }
 
-/** Why a call did not answer: no tool to run it, an override that names a tool teamai cannot run, or the tool failed. */
+/**
+ * Why a call did not answer: no tool to run it, an override that names a tool teamai cannot run or sits in a scope
+ * config here that cannot be read, or the tool failed.
+ */
 export type CallErrorKind = 'no_tool' | 'override_invalid' | 'call_failed';
 
 export class CallError extends Error {
@@ -74,7 +93,10 @@ export class CallError extends Error {
   }
 }
 
-/** Whether a call failed because the member named a tool teamai cannot run, which a caller's fallback must not hide. */
+/**
+ * Whether a call failed on the member's choice of tool: one teamai cannot run, or a scope config that cannot be read
+ * to find it. A caller's fallback must not hide either.
+ */
 export function isOverrideInvalid(error: unknown): error is CallError & { kind: 'override_invalid' } {
   return error instanceof CallError && error.kind === 'override_invalid';
 }
@@ -105,8 +127,7 @@ export function createToolCaller({ resolveTool = resolveCliPath, resolveScope = 
     return { tool, executable };
   };
 
-  const resolve = async (scope: LocalConfig | undefined): Promise<Picked> => {
-    const [first] = await memberTools(scope);
+  const resolve = async (first: MemberTool | undefined): Promise<Picked> => {
     if (first) return named(first);
     for (const tool of LAUNCH_ORDER) {
       const executable = resolveTool(executableOf(tool));
@@ -117,21 +138,22 @@ export function createToolCaller({ resolveTool = resolveCliPath, resolveScope = 
     }
     throw new CallError('no_tool', `No AI tool teamai launches is on PATH. Install one of: ${LAUNCH_ORDER.join(', ')}, or set TEAMAI_AI_TOOL to one you have.`);
   };
-  // One pick per scope, so a process that works in several projects never takes another project's tool. Only a pick
-  // that succeeded is kept, so a long-lived process sees a tool installed or a setting fixed since.
+  // One pick per tool the member names, so a process that works in several projects never takes another project's
+  // tool, and sees a setting changed since. Only a pick that succeeded is kept, so a long-lived process sees a tool
+  // installed or a setting fixed since.
   const picked = new Map<string, Promise<Picked>>();
-  const pick = async (): Promise<Picked> => {
-    const scope = await resolveScope();
-    const key = scope && scope.scope !== 'user' ? getDataHome(scope) : 'machine';
+  const pick = async (scope: LocalConfig | undefined): Promise<Picked> => {
+    const [first] = await memberTools(scope ?? await resolveScope());
+    const key = first?.tool ?? '';
     const cached = picked.get(key);
     if (cached) return cached;
-    const picking = resolve(scope).catch((error: unknown) => { picked.delete(key); throw error; });
+    const picking = resolve(first).catch((error: unknown) => { picked.delete(key); throw error; });
     picked.set(key, picking);
     return picking;
   };
 
-  const callTool: ToolCaller['callTool'] = async (prompt, { launchedBy, timeout = DEFAULT_TIMEOUT_MS }) => {
-      const { tool, executable } = await pick();
+  const callTool: ToolCaller['callTool'] = async (prompt, { launchedBy, timeout = DEFAULT_TIMEOUT_MS, scope }) => {
+      const { tool, executable } = await pick(scope);
       const { call } = launchAdapterOf(tool);
       log.debug(`[tool-launch] ${launchedBy} → ${tool}, timeout=${Math.round(timeout / 1000)}s`);
       const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'teamai-call-'));
@@ -156,7 +178,7 @@ export function createToolCaller({ resolveTool = resolveCliPath, resolveScope = 
 
   async function callToolParallel<T>(tasks: ReadonlyArray<{ prompt: string; parse: (text: string) => T }>, { concurrency = DEFAULT_CONCURRENCY, ...options }: CallOptions & { concurrency?: number }): Promise<T[]> {
     // A batch has one tool, so a tool that cannot be picked fails the batch once rather than once per task.
-    await pick();
+    await pick(options.scope);
     const settled: ({ ok: true; value: T } | { ok: false; reason: unknown })[] = [];
     let next = 0;
     const worker = async (): Promise<void> => {

@@ -432,22 +432,13 @@ async function teamCorrectionKeywords(
 }
 
 /**
- * Per-machine gateway model-alias map from the user-scope config, used to price
- * requests whose transcript records an opaque alias instead of a Claude model
- * name. Only read on stop events (where pricing happens); an unreadable config
- * means "no aliases", i.e. built-in model-name matching only.
+ * The gateway model-alias map of the hook's scope, its own entries over this
+ * machine's, used to price requests whose transcript records an opaque alias
+ * instead of a Claude model name. Only on stop events, where pricing happens.
  */
-async function userModelAliases(stdin: Record<string, unknown>): Promise<Record<string, string> | undefined> {
+function stopModelAliases(stdin: Record<string, unknown>, config: LocalConfig): Record<string, string> | undefined {
   const eventName = typeof stdin.hook_event_name === 'string' ? stdin.hook_event_name.toLowerCase() : '';
-  if (eventName !== 'stop') return undefined;
-  try {
-    const { loadLocalConfig, loadMemberSettings } = await import('./config.js');
-    const local = await loadLocalConfig();
-    const settings = local?.scope === 'user' ? local : { ...(await loadMemberSettings()), ...local };
-    return settings.modelAliases;
-  } catch {
-    return undefined;
-  }
+  return eventName === 'stop' ? config.modelAliases : undefined;
 }
 
 const dashboardReportHandler: HookHandler = {
@@ -460,7 +451,7 @@ const dashboardReportHandler: HookHandler = {
     const raw = JSON.stringify(stdin);
     const event = await parseHookEvent(raw, tool, {
       correctionKeywords: await teamCorrectionKeywords(stdin, config),
-      modelAliases: await userModelAliases(stdin),
+      modelAliases: stopModelAliases(stdin, config),
     });
     if (event) {
       // The dispatcher's scope, which knows the project even when the event
@@ -919,7 +910,7 @@ const votesJudgeHandler: HookHandler = {
       // docPaths is backfilled from the recall log above, so a subagent-recalled
       // doc the transcript gave no `File:` line for is still grounded here (#723).
       const { judgeAdoption } = await import('./votes-judge.js');
-      const adopted = await judgeAdoption(voteData.finalAssistantText, toJudge, docPaths, roots);
+      const adopted = await judgeAdoption(voteData.finalAssistantText, toJudge, docPaths, roots, localConfig);
 
       // Gate again to recalled (defensive; judgeAdoption already restricts to toJudge).
       const verified = adopted.filter((id) => recalledSet.has(id));

@@ -54,7 +54,7 @@ steps:
 
 ### 并行运行本地命令
 
-`--driver local` 最多同时运行 `workflows.max_parallel` 个命令步骤。在本地配置中设置它。默认值是 1，没有对应的命令行参数。
+`--driver local` 最多同时运行 `workflows.max_parallel` 个命令步骤。在 `~/.teamai/config.yaml` 或某个 workspace 自己的 `config.yaml` 中设置它。默认值是 1，没有对应的命令行参数。
 
 ```yaml
 workflows:
@@ -617,7 +617,7 @@ steps:
 
 `unenforced` 出现在租约、步骤和运行记录中。每个 `interactive: true` 步骤还需要支持 HITL 的驱动，见 [HITL](#hitl人在回路中)。
 
-成员可以在本地配置中、`max_parallel` 旁边，设置本机上任何驱动可以使用什么：
+成员可以在 `~/.teamai/config.yaml` 或某个 workspace 自己的 `config.yaml` 中、`max_parallel` 旁边，设置本机上任何驱动可以使用什么：
 
 ```yaml
 workflows:
@@ -628,7 +628,7 @@ workflows:
     env: [NPM_TOKEN]
 ```
 
-- `allow.network: false` 会暂缓每个要求 `network: true` 的步骤。`allow.env` 会暂缓 `requires.env`（或其 setup 的 `requires.env`）中含有未列出键的步骤。`wait.held[].missing` 指出 `policy.network` 或 `policy.env`。
+- `allow.network: false` 会暂缓每个要求 `network: true` 的步骤。`allow.env` 会暂缓 `requires.env`（或其 setup 的 `requires.env`）中含有未列出键的步骤。`wait.held[].missing` 指出 `policy.network` 或 `policy.env`。`~/.teamai/config.yaml` 中错误的 `allow` 会让工作流命令停止运行，直到修正为止，因此拼写错误不会解除限制。
 - `sandbox: true` 表示本机会隔离它运行的内容，例如 CI 虚拟机或容器，因此本地驱动声明 `sandbox` 隔离。
 - `max_parallel` 还限制本机上所有驱动同时持有同一运行的租约数。
 
