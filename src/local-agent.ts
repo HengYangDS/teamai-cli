@@ -31,11 +31,10 @@ import { getAgentVersion } from './agent-version.js';
 import { getMachineId, deriveLocalAgentId } from './machine-id.js';
 import { EXCLUDED_RULE_NAMES } from './builtin-rules.js';
 import { ruleStemFromFilename } from './resources/rule-format.js';
+import { unreadableConfigOf } from './resources/rules.js';
 import { resolveTeamaiEntryScript } from './builtin-hooks.js';
-import { resolveOpenclawWorkspaceDir } from './openclaw-hooks.js';
 import { assertSafeResourceName } from './utils/path-safety.js';
 import {
-  detectMcpFormat,
   supportsTransport,
   renderJsonEntry,
   renderCodexBlock,
@@ -80,7 +79,6 @@ import { opencodeV1ClaudeFile } from './resources/opencode-config.js';
 import { reconcilePlugins, teardownAllPlugins, parseGetConfig, substituteVars, unresolvedPlaceholders, type ReconcileDeps, type PluginState } from './plugin-lifecycle.js';
 import {
   resolveBaseDir,
-  resolveToolBaseDir,
   scopedToolPaths,
   applyToolRoots,
   getDataHome,
@@ -119,6 +117,7 @@ import {
 import { blockingEntries, contentHash, deliveredSkillFiles, describeMembersDirLeft, isLink, keepsTrackedCopy, ownsSkillDir } from './resources/delivered-copies.js';
 import { skillOrigin, withSkillFrontmatter } from './resources/skills.js';
 import { hookSettingsFile, installOf, locate, ownOf, writable, type FilePlace } from './locate.js';
+import { mcpFormatOf } from './tools.js';
 import { acquireLock, releaseLock } from './update.js';
 
 const execFileAsync = promisify(execFile);
@@ -2822,19 +2821,29 @@ async function syncClaudemd(
     }
     const location = await locate(tool, 'blocks', install);
     // A server-sent workspace can exist where OpenClaw's own lookup finds none.
-    const openclawWs = tool === 'openclaw' && localConfig.scope !== 'project' ? await resolveOpenclawWorkspaceDir(workspacePath) : null;
-    const own: FilePlace | null = openclawWs
-      ? { kind: 'file', path: path.join(openclawWs, 'AGENTS.md'), owned: false, header: null }
+    const sentWorkspace = tool === 'openclaw' && localConfig.scope !== 'project' && workspacePath !== undefined && await pathExists(workspacePath)
+      ? workspacePath
+      : null;
+    const own: FilePlace | null = sentWorkspace !== null
+      ? { kind: 'file', path: path.join(sentWorkspace, 'AGENTS.md'), owned: false, header: null }
       : ownOf(location);
+    const unreadable = sentWorkspace === null ? unreadableConfigOf(location) : undefined;
+    if (unreadable !== undefined) {
+      const problem = `teamai cannot read ${unreadable.file} as plain JSON, so it cannot tell which workspace ${tool} reads, `
+        + 'and writes no instructions there. Make that file plain JSON (no comments or trailing commas), then retry.';
+      log.warn(problem);
+      skipped.push(problem);
+      continue;
+    }
     if (own === null) continue;
-    const toolInstalled = openclawWs ? await pathExists(openclawWs) : writable(location) !== null;
+    const toolInstalled = sentWorkspace !== null || writable(location) !== null;
     if (!toolInstalled) {
       log.debug(`Skipped CLAUDE.md sync for ${tool}: target not found`);
       continue;
     }
 
     const claudeMdPath = own.path;
-    const baseDir = resolveToolBaseDir(tool, localConfig);
+    const baseDir = resolveBaseDir(localConfig);
     // OpenCode V1's Claude fallback already carries the blocks, as in pull
     // (#945), so OpenCode's file is written for V2's plugin but not listed.
     const claudeUserFile = opencodeV1ClaudeFile(getUserHome());
@@ -2899,7 +2908,7 @@ async function syncClaudemd(
     for (const tool of target.tools) {
       if (tool === 'opencode' && block && !resolved.opencodeFallback) {
         const { opencodeContextReference, readOpencodeInstructionList } = await import('./resources/opencode-config.js');
-        const { config, entry } = opencodeContextReference(target.path, localConfig.scope, resolveToolBaseDir(tool, localConfig));
+        const { config, entry } = opencodeContextReference(target.path, localConfig.scope, resolveBaseDir(localConfig));
         if (!(await readOpencodeInstructionList(config))?.includes(entry)) continue;
       }
       reached.push(tool);
@@ -3966,7 +3975,7 @@ async function installMcpServer(
     throw new Error(`install_mcp: tool "${tool}" has no MCP config path for scope "${scope}"`);
   }
 
-  const format = detectMcpFormat(tool);
+  const format = mcpFormatOf(tool);
   if (!format) {
     throw new Error(`install_mcp: tool "${tool}" has no known MCP format`);
   }
@@ -4176,7 +4185,7 @@ async function uninstallMcpServer(
   if (!place) return;
 
   const projectScope = scope === 'project';
-  const format = detectMcpFormat(tool);
+  const format = mcpFormatOf(tool);
   if (!format) return;
 
   const { resolveDataHomeForScope } = await import('./config.js');

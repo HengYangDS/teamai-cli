@@ -12,15 +12,14 @@ import {
   TEAMAI_AGENT_HOOK_PREFIX,
   getManagedHooksPath,
   legacyManagedHooksPath,
-  getCopilotHome,
+  resolveBaseDir,
   resolveHookScope,
   resolveLegacyProjectHookScope,
-  resolveToolBaseDir,
   scopedToolPaths,
   hookToolPathsForConfig,
   toolGateRoot,
 } from './types.js';
-import type { HookDef, TeamaiConfig, LocalConfig, ManagedMcpManifest, Scope } from './types.js';
+import type { HookDef, TeamaiConfig, LocalConfig, ManagedMcpManifest, Scope, ToolId } from './types.js';
 import {
   CODEX_TOOL_ID,
   DEFAULT_CODEX_ROOT,
@@ -51,7 +50,7 @@ import {
 import { codexDispatcherCheckouts, codexDispatcherProjects, dispatchedCodexHooks, isCodexTeamHookDispatcher, reconcileCodexDispatchers, runsFromCodexDispatcher, setCodexDispatcherHooks } from './codex-team-hooks.js';
 import type { CodexTeamHook } from './codex-team-hooks.js';
 import { channelsOf, hookFormatOf, hookSettingsFormatOf, type HookAdapterId, type HookFormat } from './tools.js';
-import { earlierHookAdapterDir, hookSettingsFile } from './locate.js';
+import { earlierHookAdapterDir, hookSettingsFile, installOf, locate, openclawWorkspaceDir, ownOf, workspaceHooksOf } from './locate.js';
 import { toolHome } from './tool-home.js';
 
 export { claudeHookOtherHostSkip };
@@ -942,7 +941,7 @@ function gatedProjectRoot(command: string): string | null {
  * HOME, which every worktree reads from its first session. Every other tool
  * keeps its team hooks in HOME behind a `$PWD` gate.
  */
-const MAIN_CHECKOUT_TEAM_HOOK_TOOLS = ['claude', 'codex'] as const;
+const MAIN_CHECKOUT_TEAM_HOOK_TOOLS = ['claude', 'codex'] as const satisfies readonly ToolId[];
 
 /** Where a non-self project scope keeps Claude/Codex team hooks. */
 export interface MainCheckoutHooks {
@@ -1931,9 +1930,9 @@ export async function copilotBuiltinInstalled(event: string, matcher: string, pr
   const def = copilotBuiltinDef(event, matcher);
   if (!def) return false;
   const expected = toCopilotEntry(def);
-  const dirs = [path.join(getCopilotHome(), 'hooks')];
+  const dirs = [path.join(toolHome(COPILOT_TOOL_ID), 'hooks')];
   const project = projectConfig && (process.env.COPILOT_PROJECT_DIR?.trim()
-    || (projectConfig.scope === 'project' ? resolveToolBaseDir(COPILOT_TOOL_ID, projectConfig) : undefined));
+    || (projectConfig.scope === 'project' ? resolveBaseDir(projectConfig) : undefined));
   if (project) dirs.push(path.join(project, '.github', 'hooks'));
   for (const dir of dirs) {
     for (const name of await readdir(dir).catch(() => [] as string[])) {
@@ -1951,7 +1950,7 @@ export async function copilotBuiltinInstalled(event: string, matcher: string, pr
  * directory, whichever project configured its filename.
  */
 export async function removeCopilotGlobalBuiltins(): Promise<void> {
-  const dir = path.join(getCopilotHome(), 'hooks');
+  const dir = path.join(toolHome(COPILOT_TOOL_ID), 'hooks');
   const files = await readdir(dir).catch(() => [] as string[]);
   for (const name of files.filter(name => name.endsWith('.json')).sort()) {
     const file = path.resolve(dir, name);
@@ -2939,16 +2938,15 @@ async function clearEarlierHomeHooks(target: {
  * writes exactly one copy, in the user agent dir, matching the OpenCode
  * plugin policy and the settings.json hooks of every other tool (which also
  * live in HOME and gate on the `cwd` fed to hook-dispatch). Install only when
- * ~/.omp exists, so a machine without OMP never grows a config dir.
+ * ~/.omp or OMP's moved agent dir exists, so a machine without OMP never grows a config dir.
  */
 async function reconcileOmpExtension(removeAll = false): Promise<void> {
-  const home = getUserHome();
   const { injectOmpHooks, removeOmpHooks } = await import('./omp-hooks.js');
   if (removeAll) {
     await removeOmpHooks();
     return;
   }
-  if (await pathExists(path.join(home, '.omp'))) {
+  if (await pathExists(path.join(getUserHome(), '.omp')) || await pathExists(toolHome('omp'))) {
     await injectOmpHooks();
   }
 }
@@ -3065,10 +3063,11 @@ export async function injectHooksToAllTools(toolPaths: Record<string, { settings
       } catch (e) {
         log.warn(`Failed to inject hook into ${tool}: ${(e as Error).message}`);
       }
-    } else if (OPENCLAW_TOOLS.has(tool)) {
+    } else if (tool === 'openclaw') {
+      // Only OpenClaw itself, as in reconcileHooksToAllTools: a claw variant here would overwrite OpenClaw's handler with its own --tool.
       try {
         const { injectOpenClawHooks } = await import('./openclaw-hooks.js');
-        await injectOpenClawHooks(undefined, tool);
+        await injectOpenClawHooks(tool);
       } catch (e) {
         log.warn(`Failed to inject OpenClaw hook into ${tool}: ${(e as Error).message}`);
       }
@@ -3212,8 +3211,7 @@ export async function reconcileHooksToAllTools(
     if (tool === 'hermes') {
       if (opts.settingsOnly) continue;
       try {
-        const { getHermesHome } = await import('./hermes-home.js');
-        const hermesRoot = getHermesHome();
+        const hermesRoot = toolHome('hermes');
         if (opts.removeAll) {
           const { removeHermesHooks } = await import('./hermes-hooks.js');
           await removeHermesHooks();
@@ -3231,20 +3229,20 @@ export async function reconcileHooksToAllTools(
     // handler.ts pair under the resolved workspace dir. Route it to that
     // adapter, which no-ops when the workspace cannot be resolved, so an
     // uninstalled OpenClaw never grows a config dir. Only `openclaw` itself:
-    // resolveOpenclawWorkspaceDir resolves the OpenClaw workspace, so routing
+    // `openclawWorkspaceDir` resolves the OpenClaw workspace, so routing
     // the other claw variants here would make them overwrite that one handler
     // with each other's --tool value.
     if (tool === 'openclaw') {
       if (opts.settingsOnly) continue;
       try {
         if (opts.removeAll) {
-          const { removeOpenClawHooks, removeOpenClawHookEntry, resolveOpenclawWorkspaceDir } = await import('./openclaw-hooks.js');
-          const wsDir = await resolveOpenclawWorkspaceDir();
+          const { removeOpenClawHooks, removeOpenClawHookEntry } = await import('./openclaw-hooks.js');
+          const wsDir = await openclawWorkspaceDir();
           if (wsDir) await removeOpenClawHooks(path.join(wsDir, 'hooks'));
           await removeOpenClawHookEntry();
         } else {
           const { injectOpenClawHooks } = await import('./openclaw-hooks.js');
-          await injectOpenClawHooks(undefined, tool);
+          await injectOpenClawHooks(tool);
         }
       } catch (e) {
         log.warn(`Failed to reconcile OpenClaw hooks for ${tool}: ${(e as Error).message}`);
@@ -4029,12 +4027,11 @@ export async function reconcileTeamHooksForConfig(
     && (explicitlySelectedAgents?.includes(COPILOT_TOOL_ID) ?? false);
   const copilotEnabled = !copilotExcluded && (
     copilotSelected
-    || (explicitlySelectedAgents === undefined && await pathExists(getCopilotHome()))
+    || (explicitlySelectedAgents === undefined && await pathExists(toolHome(COPILOT_TOOL_ID)))
   );
-  const copilotConfig = { ...localConfig, scope: hookScope };
-  const copilotPaths = hookToolPaths[COPILOT_TOOL_ID];
-  if (copilotEnabled && copilotPaths?.hooks) {
-    const copilotHooksPath = path.join(resolveToolBaseDir(COPILOT_TOOL_ID, copilotConfig), copilotPaths.hooks);
+  const copilotHooks = await locate(COPILOT_TOOL_ID, 'hooks', installOf(teamConfig, localConfig));
+  const copilotHooksPath = hookToolPaths[COPILOT_TOOL_ID]?.hooks === undefined ? undefined : ownOf(copilotHooks)?.path;
+  if (copilotEnabled && copilotHooksPath !== undefined) {
     const splitCopilotHooks = localConfig.scope === 'project' && hookScope === 'user';
     const copilotManifestPath = splitCopilotHooks ? undefined : getManagedHooksPath(localConfig);
     // The user file is shared by every project; dispatch applies each project's `builtin.disabled`.
@@ -4042,7 +4039,7 @@ export async function reconcileTeamHooksForConfig(
     const copilotInstalled = await builtinsInstalled(
       builtinsOnly, copilotHooksPath, COPILOT_TOOL_ID, copilotManifestPath ?? manifestPath, copilotBuiltin);
     if (copilotInstalled && hookScope === 'user') await markCopilotGlobalBuiltins(copilotHooksPath);
-    if (!copilotInstalled && (copilotSelected || await pathExists(getCopilotHome()))) {
+    if (!copilotInstalled && (copilotSelected || await pathExists(toolHome(COPILOT_TOOL_ID)))) {
       await reconcileHooks(copilotHooksPath, COPILOT_TOOL_ID, splitCopilotHooks ? [] : teamDefs, {
         manifestPath: builtinsOnly ? undefined : copilotManifestPath,
         removeAll: opts.removeAll,
@@ -4053,9 +4050,8 @@ export async function reconcileTeamHooksForConfig(
       });
     }
     if (splitCopilotHooks && !builtinsOnly) {
-      const projectHooks = scopedToolPaths(teamConfig, localConfig)[COPILOT_TOOL_ID]?.hooks;
-      if (projectHooks) {
-        const projectFile = path.join(resolveToolBaseDir(COPILOT_TOOL_ID, localConfig), projectHooks);
+      const projectFile = workspaceHooksOf(copilotHooks)?.path;
+      if (projectFile !== undefined) {
         if (await pathExists(projectFile) || teamDefsForTool(teamDefs, COPILOT_TOOL_ID).length > 0) {
           await reconcileHooks(projectFile, COPILOT_TOOL_ID, teamDefs, {
             manifestPath: getManagedHooksPath(localConfig),
@@ -4127,10 +4123,11 @@ async function projectHookFiles(
   if (selfLocal && ((await readManifest(selfManifest)).claude?.length ?? 0) > 0) {
     files.push({ file: selfLocal, tool: 'claude', manifestPath: selfManifest });
   }
-  const copilotHooks = scopedToolPaths(teamConfig, localConfig)[COPILOT_TOOL_ID]?.hooks;
-  if (copilotHooks) {
+  const copilotHooks = await locate(COPILOT_TOOL_ID, 'hooks', installOf(teamConfig, localConfig));
+  const copilotFile = (workspaceHooksOf(copilotHooks) ?? ownOf(copilotHooks))?.path;
+  if (copilotFile !== undefined) {
     files.push({
-      file: path.join(resolveToolBaseDir(COPILOT_TOOL_ID, localConfig), copilotHooks),
+      file: copilotFile,
       tool: COPILOT_TOOL_ID,
       manifestPath: getManagedHooksPath(localConfig),
     });

@@ -1835,6 +1835,8 @@ describe('uninstall', () => {
       await fse.outputFile(path.join(skill, 'SKILL.md'), '# Team Skill');
       const rule = path.join(projectRoot, '.trae', 'rules', 'team-rule.md');
       await fse.outputFile(rule, '---\nalwaysApply: true\n---\n\n# Team Rule\n');
+      const agentFile = path.join(projectRoot, '.trae', 'agents', 'teamai-recall.md');
+      await fse.outputFile(agentFile, '---\nname: teamai-recall\ndescription: Recall\n---\nRecall.\n');
       // What a pull recorded delivering: proves the copies teamai's (#993),
       // so a removal run takes them instead of keeping them as the member's.
       const state = await loadStateForScope(localConfig);
@@ -1842,8 +1844,24 @@ describe('uninstall', () => {
         [await checkoutKey(projectRoot)]: { rev: 'old', targets: [], delivered: { [path.join(skill, 'SKILL.md')]: (await fileHash(path.join(skill, 'SKILL.md')))! } },
       };
       await saveStateForScope(state, localConfig);
-      return { skill, rule, localConfig };
+      return { skill, rule, agentFile, localConfig };
     }
+
+    it.each(['trae', 'trae-cn'] as const)('uninstall --agent %s keeps the shared project agents the other still reads', async (agent) => {
+      const { agentFile } = await sharedFixture(agent);
+
+      await uninstall({ force: true, agent });
+
+      expect(await fse.pathExists(agentFile)).toBe(true);
+    });
+
+    it('a full uninstall removes the shared project agents', async () => {
+      const { agentFile } = await sharedFixture(undefined);
+
+      await uninstall({ force: true });
+
+      expect(await fse.pathExists(agentFile)).toBe(false);
+    });
 
     it.each(['trae', 'trae-cn'] as const)('uninstall --agent %s keeps the shared skills the other still reads', async (agent) => {
       const { skill, rule } = await sharedFixture(agent);
@@ -2380,6 +2398,28 @@ describe('uninstall', () => {
     // The OpenClaw HOOK.md dir must be removed (regression: previously leaked).
     expect(await fse.pathExists(ocHookDir)).toBe(false);
     expect(await fse.readJson(ocConfig)).toEqual({ hooks: { internal: { entries: { mine: { enabled: true } } } } });
+  });
+
+  it('uninstalling another tool leaves OpenClaw\'s workspace hook and its openclaw.json entry', async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const wsHookDir = path.join(homeDir, '.openclaw', 'workspace', 'hooks', 'teamai-status-report');
+    await fse.ensureDir(wsHookDir);
+    await fse.writeFile(path.join(wsHookDir, 'HOOK.md'), '---\nname: [teamai] status-report\n---\n');
+    await fse.writeFile(path.join(wsHookDir, 'handler.ts'), '// teamai');
+    const ocConfig = path.join(homeDir, '.openclaw', 'openclaw.json');
+    const entries = { hooks: { internal: { entries: { 'teamai-status-report': { enabled: true } } } } };
+    await fse.writeJson(ocConfig, entries);
+    const teamConfig = makeTeamConfig({
+      toolPaths: { hermes: { skills: '.hermes/skills' }, openclaw: { skills: '.openclaw/skills' } },
+    });
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath), teamConfig });
+
+    await uninstall({ force: true, agent: 'hermes' });
+
+    expect(await fse.pathExists(path.join(wsHookDir, 'handler.ts'))).toBe(true);
+    expect(await fse.readJson(ocConfig)).toEqual(entries);
   });
 
   it('project-scope uninstall keeps the user OpenCode plugin and removes the project copy', async () => {
@@ -3794,6 +3834,155 @@ describe('uninstall', () => {
     expect(await fse.pathExists(stub)).toBe(false);
   });
 
+  it('removes the Hermes hook and plugin from the home init recorded, from a shell without HERMES_HOME (#1221)', async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const hermesHome = path.join(tmpDir, 'hermes');
+    vi.stubEnv('HERMES_HOME', hermesHome);
+    const { injectHermesHooks } = await import('../hermes-hooks.js');
+    await injectHermesHooks();
+    await fse.outputJson(path.join(homeDir, '.teamai', 'tool-homes.json'), { hermes: hermesHome });
+    vi.stubEnv('HERMES_HOME', '');
+
+    const teamConfig = makeTeamConfig();
+    teamConfig.toolPaths.hermes = { skills: '.hermes/skills' };
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath), teamConfig });
+    await uninstall({ force: true });
+
+    expect(await fse.pathExists(path.join(hermesHome, 'hooks', 'teamai-status-report.sh'))).toBe(false);
+    expect(await fse.pathExists(path.join(hermesHome, 'plugins', 'teamai-instructions'))).toBe(false);
+    expect(YAML.parse(await fse.readFile(path.join(hermesHome, 'config.yaml'), 'utf8')) ?? {}).toEqual({});
+    expect(await fse.readJson(path.join(hermesHome, 'shell-hooks-allowlist.json'))).toEqual({ approvals: [] });
+  });
+
+  it('removes the Hermes hook and plugin from the root of a recorded profile home, from a shell without HERMES_HOME (#1221)', async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const root = path.join(tmpDir, 'srv-hermes');
+    const work = path.join(root, 'profiles', 'work');
+    const { injectHermesHooks } = await import('../hermes-hooks.js');
+    vi.stubEnv('HERMES_HOME', root);
+    await injectHermesHooks();
+    vi.stubEnv('HERMES_HOME', work);
+    await injectHermesHooks();
+    await fse.outputJson(path.join(homeDir, '.teamai', 'tool-homes.json'), { hermes: work });
+    vi.stubEnv('HERMES_HOME', '');
+
+    const teamConfig = makeTeamConfig();
+    teamConfig.toolPaths.hermes = { skills: '.hermes/skills' };
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath), teamConfig });
+    await uninstall({ force: true });
+
+    for (const home of [root, work]) {
+      expect(await fse.pathExists(path.join(home, 'hooks', 'teamai-status-report.sh'))).toBe(false);
+      expect(await fse.pathExists(path.join(home, 'plugins', 'teamai-instructions'))).toBe(false);
+    }
+  });
+
+  it("removes teamai's Hermes hook, plugin and SOUL.md block from the default home and every profile, and lists them (#1221)", async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    vi.stubEnv('HERMES_HOME', '');
+    const hermes = path.join(homeDir, '.hermes');
+    const work = path.join(hermes, 'profiles', 'work');
+    const { injectHermesHooks } = await import('../hermes-hooks.js');
+    // An earlier release wrote the default home; a pull with `work` active wrote the profile.
+    await injectHermesHooks();
+    await fse.ensureDir(work);
+    await fse.writeFile(path.join(hermes, 'active_profile'), 'work\n');
+    await injectHermesHooks();
+    const block = `${TEAMAI_RULES_START}\nTeam rule\n${TEAMAI_RULES_END}\n`;
+    await fse.outputFile(path.join(hermes, 'SOUL.md'), `my soul\n\n${block}`);
+    await fse.outputFile(path.join(work, 'SOUL.md'), block);
+    // The member switched to another profile since.
+    await fse.ensureDir(path.join(hermes, 'profiles', 'other'));
+    await fse.writeFile(path.join(hermes, 'active_profile'), 'other\n');
+    const foreignPlugin = path.join(hermes, 'profiles', 'mine', 'plugins', 'teamai-instructions', 'plugin.yaml');
+    await fse.outputFile(foreignPlugin, 'name: teamai-instructions\n');
+
+    const teamConfig = makeTeamConfig();
+    teamConfig.toolPaths.hermes = { skills: '.hermes/skills' };
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath), teamConfig });
+    const printed = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await uninstall({ force: true });
+    const summary = printed.mock.calls.map((call) => call.join(' ')).join('\n');
+
+    for (const home of [hermes, work]) {
+      const script = path.join(home, 'hooks', 'teamai-status-report.sh');
+      expect(await fse.pathExists(script)).toBe(false);
+      expect(summary).toContain(script);
+      expect(await fse.pathExists(path.join(home, 'plugins', 'teamai-instructions'))).toBe(false);
+      expect(summary).toContain(path.join(home, 'plugins', 'teamai-instructions'));
+      expect(YAML.parse(await fse.readFile(path.join(home, 'config.yaml'), 'utf8')) ?? {}).toEqual({});
+      expect(await fse.readJson(path.join(home, 'shell-hooks-allowlist.json'))).toEqual({ approvals: [] });
+      expect(summary).toContain(path.join(home, 'SOUL.md'));
+    }
+    expect(await fse.readFile(path.join(hermes, 'SOUL.md'), 'utf8')).toBe('my soul\n');
+    expect(await fse.pathExists(path.join(work, 'SOUL.md'))).toBe(false);
+    expect(await fse.readFile(foreignPlugin, 'utf8')).toBe('name: teamai-instructions\n');
+  });
+
+  it("removes teamai's Oh My Pi extension from the default profile and every other one, and lists them (#1221)", async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const { injectOmpHooks, OMP_HOOK_FILE } = await import('../omp-hooks.js');
+    await injectOmpHooks();
+    vi.stubEnv('OMP_PROFILE', 'work');
+    await injectOmpHooks();
+    const extensions = [
+      path.join(homeDir, '.omp', 'agent', 'extensions', OMP_HOOK_FILE),
+      path.join(homeDir, '.omp', 'profiles', 'work', 'agent', 'extensions', OMP_HOOK_FILE),
+    ];
+    const foreign = path.join(homeDir, '.omp', 'profiles', 'mine', 'agent', 'extensions', OMP_HOOK_FILE);
+    await fse.outputFile(foreign, '// my own extension\n');
+
+    const defaults = TeamaiConfigSchema.parse({ team: 't', repo: 'owner/repo' }).toolPaths;
+    mockAutoDetectInit.mockResolvedValue({
+      localConfig: makeLocalConfig(homeDir, repoPath, { enabledAgents: ['omp'] }),
+      teamConfig: makeTeamConfig({ toolPaths: { omp: defaults.omp } }),
+    });
+    const printed = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await uninstall({ force: true });
+    const summary = printed.mock.calls.map((call) => call.join(' ')).join('\n');
+
+    for (const file of extensions) {
+      expect(await fse.pathExists(file)).toBe(false);
+      expect(summary).toContain(file);
+    }
+    expect(await fse.readFile(foreign, 'utf8')).toBe('// my own extension\n');
+  });
+
+  it("removes teamai's Oh My Pi extension from the default profile of the PI_CONFIG_DIR init recorded, from a shell without it (#1221)", async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const { injectOmpHooks, OMP_HOOK_FILE } = await import('../omp-hooks.js');
+    vi.stubEnv('PI_CONFIG_DIR', '.omp-alt');
+    await injectOmpHooks();
+    vi.stubEnv('OMP_PROFILE', 'work');
+    await injectOmpHooks();
+    await fse.outputJson(path.join(homeDir, '.teamai', 'tool-homes.json'), { omp: path.join(homeDir, '.omp-alt', 'profiles', 'work', 'agent') });
+    vi.stubEnv('PI_CONFIG_DIR', '');
+    vi.stubEnv('OMP_PROFILE', '');
+    const extensions = [
+      path.join(homeDir, '.omp-alt', 'agent', 'extensions', OMP_HOOK_FILE),
+      path.join(homeDir, '.omp-alt', 'profiles', 'work', 'agent', 'extensions', OMP_HOOK_FILE),
+    ];
+
+    const defaults = TeamaiConfigSchema.parse({ team: 't', repo: 'owner/repo' }).toolPaths;
+    mockAutoDetectInit.mockResolvedValue({
+      localConfig: makeLocalConfig(homeDir, repoPath, { enabledAgents: ['omp'] }),
+      teamConfig: makeTeamConfig({ toolPaths: { omp: defaults.omp } }),
+    });
+    await uninstall({ force: true });
+
+    for (const file of extensions) expect(await fse.pathExists(file)).toBe(false);
+  });
+
   it('a project-scope uninstall leaves the SOUL.md rules block, which only a user-scope pull writes (#946)', async () => {
     const projectRoot = path.join(tmpDir, 'hermes-project');
     const homeDir = path.join(tmpDir, 'home');
@@ -4081,6 +4270,73 @@ describe('uninstall', () => {
       [],
       expect.objectContaining({ removeAll: true }),
     );
+  });
+
+  it('deletes the Copilot hook file it emptied in COPILOT_HOME, and keeps one holding a member hook', async () => {
+    const { reconcileHooks } = await vi.importActual<typeof import('../hooks.js')>('../hooks.js');
+    mockReconcileHooks.mockImplementation(reconcileHooks);
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    const copilotHome = path.join(tmpDir, 'custom-copilot-home');
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('COPILOT_HOME', copilotHome);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const teamaiEntry = {
+      type: 'command',
+      bash: 'teamai hook-dispatch session-start --tool copilot',
+      powershell: 'teamai hook-dispatch session-start --tool copilot',
+    };
+    const memberEntry = { type: 'command', bash: 'echo mine', powershell: 'echo mine' };
+    const hookPath = path.join(copilotHome, 'hooks', 'teamai.json');
+    const memberPath = path.join(copilotHome, 'hooks', 'mine.json');
+    await fse.ensureDir(path.dirname(hookPath));
+    await fse.writeJson(hookPath, { version: 1, hooks: { SessionStart: [teamaiEntry], UserPromptSubmit: [teamaiEntry] } });
+    await fse.writeJson(memberPath, { version: 1, hooks: { SessionStart: [memberEntry] } });
+
+    const teamConfig = makeTeamConfig({
+      toolPaths: {
+        copilot: {
+          skills: '.github/skills',
+          hooks: '.github/hooks/teamai.json',
+          userScope: { skills: 'skills', hooks: 'hooks/teamai.json' },
+        },
+      },
+    });
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath, { enabledAgents: ['copilot'] }), teamConfig });
+
+    commitTeamRepo(repoPath);
+    await uninstall({ force: true });
+
+    expect(await fse.pathExists(hookPath)).toBe(false);
+    expect(await fse.readJson(memberPath)).toEqual({ version: 1, hooks: { SessionStart: [memberEntry] } });
+  });
+
+  it('keeps the Copilot hook file when a member hook is left beside teamai\'s', async () => {
+    const { reconcileHooks } = await vi.importActual<typeof import('../hooks.js')>('../hooks.js');
+    mockReconcileHooks.mockImplementation(reconcileHooks);
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    const copilotHome = path.join(tmpDir, 'custom-copilot-home');
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('COPILOT_HOME', copilotHome);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const teamaiEntry = {
+      type: 'command',
+      bash: 'teamai hook-dispatch session-start --tool copilot',
+      powershell: 'teamai hook-dispatch session-start --tool copilot',
+    };
+    const memberEntry = { type: 'command', bash: 'echo mine', powershell: 'echo mine' };
+    const hookPath = path.join(copilotHome, 'hooks', 'teamai.json');
+    await fse.ensureDir(path.dirname(hookPath));
+    await fse.writeJson(hookPath, { version: 1, hooks: { SessionStart: [teamaiEntry, memberEntry] } });
+
+    const teamConfig = makeTeamConfig({
+      toolPaths: { copilot: { skills: '.github/skills', hooks: '.github/hooks/teamai.json', userScope: { skills: 'skills', hooks: 'hooks/teamai.json' } } },
+    });
+    mockAutoDetectInit.mockResolvedValue({ localConfig: makeLocalConfig(homeDir, repoPath, { enabledAgents: ['copilot'] }), teamConfig });
+
+    commitTeamRepo(repoPath);
+    await uninstall({ force: true });
+
+    expect(await fse.readJson(hookPath)).toEqual({ version: 1, hooks: { SessionStart: [memberEntry] } });
   });
 
   it('--agent claude 但 codex 仍有资源 → 保留共享', async () => {

@@ -2,9 +2,9 @@ import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { autoDetectInit, loadLocalConfig, loadStateForScope, readConfigFrom, resolveMemberToolRoots, saveLocalConfig, saveLocalConfigForScope, saveStateForScope, UnreadableProjectConfigError, detectProjectConfig } from './config.js';
 import { createDeliveryRecorder, deliveredOwner, deliveredOwnerElsewhere } from './git-exclude-delivered.js';
-import { gitExcludeFile, gitTracks, MCP_EXCLUDE_OWNER, realFilePath, remove as removeGitExclude, stateHomeRecord, type GitExcludeFileRemoval } from './git-exclude.js';
+import { gitExcludeFile, gitTracks, gitUntracked, MCP_EXCLUDE_OWNER, realFilePath, remove as removeGitExclude, stateHomeRecord, type GitExcludeFileRemoval } from './git-exclude.js';
 import {
-  codexTrustPolicy, migrateLegacyManagedHooks, reconcileHooks, hasTeamaiHooks, hasUnrecordedTeamHooks, mainCheckoutHookFile, resolveMainCheckoutHooks, selfLocalTeamHookFile,
+  codexTrustPolicy, migrateLegacyManagedHooks, OPENCLAW_TOOLS, reconcileHooks, hasTeamaiHooks, hasUnrecordedTeamHooks, mainCheckoutHookFile, resolveMainCheckoutHooks, selfLocalTeamHookFile,
   stopCodexTeamHookDispatch, teamHookHistory, canonicalProjectRoot, getToolCheckouts, unregisterCheckoutFromSharedManifest,
   type CodexTrustPolicy, type MainCheckoutHooks, type SharedHooksManifest, type TeamHookHistory,
 } from './hooks.js';
@@ -15,7 +15,6 @@ import {
   OPENCLAW_HOOK_DIR,
   OPENCLAW_HOOK_KEY,
   resolveOpenClawHooksDir,
-  resolveOpenclawWorkspaceDir,
 } from './openclaw-hooks.js';
 import {
   TEAMAI_RULES_START,
@@ -28,6 +27,7 @@ import {
   TEAMAI_RECALL_RULES_END,
   TEAMAI_TEAM_RULES_START,
   TEAMAI_TEAM_RULES_END,
+  COPILOT_TOOL_ID,
   getDataHome,
   getTeamaiHome,
   getManagedHooksPath,
@@ -39,7 +39,6 @@ import {
   resolveBaseDir,
   resolveHookScope,
   resolveLegacyProjectHookScope,
-  resolveToolBaseDir,
   scopedToolPaths,
   hookToolPathsForConfig,
   SYNC_LOCK_FILENAME,
@@ -58,7 +57,6 @@ import { resolveDocsDestination } from './resources/docs.js';
 import { listTeamAgentDirs, ownsAgentCopy } from './resources/agents.js';
 import { RulesHandler, inlineRulesLabelOf, inlineRulesLocationOf, isLegacyLayoutCopy, ownsRuleCopy } from './resources/rules.js';
 import { deliveredHashes, projectCheckouts, syncDeliveredGitExclude } from './pull.js';
-import { isToolInstalledForConfig } from './resources/base.js';
 import { BUILTIN_AGENT_NAMES } from './builtin-agents.js';
 import {
   BUILTIN_SKILL_NAMES,
@@ -69,8 +67,9 @@ import {
   removeOwnedFiles,
   skillsGuardBase,
 } from './builtin-skills.js';
-import { cleanupOf, hookAdapterDir, hookSettingsFile, installOf, locate, ownOf, SHARED_AGENT_SKILLS_PATH, writesOf, type Location } from './locate.js';
-import { channelsOf } from './tools.js';
+import { cleanupOf, hookAdapterDirIn, hookSettingsFile, installOf, isInstalledFor, locate, openclawWorkspaceDir, ownOf, SHARED_AGENT_SKILLS_PATH, workspaceHooksOf, writesOf, type Location } from './locate.js';
+import { toolHome, toolHomesAcrossProfiles } from './tool-home.js';
+import { channelsOf, hookFormatOf } from './tools.js';
 import { CODEX_TOOL_IDS } from './utils/tool-names.js';
 import { allowsSkillDirectory, CODEX_TOOL, describeOutsideSkillLink, describeSkillDirectoryBlock, findSkillDirectoryBlock, skillOrigin } from './resources/skills.js';
 import { describeKeptDir, describeMembersDirLeft, isLink, keepsTrackedCopy, ownsSkillDir, teamaiSkillFiles } from './resources/delivered-copies.js';
@@ -116,8 +115,8 @@ interface RemovalPlan {
   openclawHookDirs: Array<{ hooksDir: string; tool: string }>;
   /** OpenCode teamai plugin files (.opencode/plugin/teamai-*.ts) to delete. */
   opencodePluginDirs: string[];
-  /** teamai-managed OMP extension file (~/.omp/agent/extensions/teamai-hooks.ts), if present. */
-  ompHookFile: string | null;
+  /** teamai's OMP extension in every profile that has one (~/.omp/agent/extensions/teamai-hooks.ts, ~/.omp/profiles/<name>/agent/…). */
+  ompHookFiles: string[];
   kiroHookFile: string | null;
   /** Pi extension files owned by this scope (global for user, legacy project copy for project). */
   piHookFiles: string[];
@@ -195,8 +194,14 @@ interface RemovalPlan {
   keptForProjects: KeptForProjects;
   /** Whether shared resources (docs / ~/.teamai / shell profile) are part of this removal. */
   includeShared: boolean;
-  /** Whether this removal targets Hermes (clears its SOUL.md block + config.yaml hook). */
-  hermesCleanup: boolean;
+  /**
+   * The Hermes homes and profiles holding teamai's hook, plugin or config.yaml entries, each with the
+   * summary lines naming what goes. Resolved with the plan: removing the data home takes the tool-homes record that
+   * names a recorded home (#1221).
+   */
+  hermesHomes: Array<{ home: string; lines: string[] }>;
+  /** The SOUL.md files holding teamai's rules block, in any Hermes home or profile: only a user-scope pull writes one (#946). */
+  hermesSouls: string[];
   /** Scope being uninstalled (issue #73: surfaced to the user). */
   scope: Scope;
   /** Whether this removal takes the machine-wide adapters: a user-scope uninstall only. */
@@ -244,7 +249,7 @@ interface ToolResources {
   hookFiles: Array<{ path: string; tool: string; manifestPath: string; teamOnly?: boolean; legacyManifestPath?: string; teamHookProjectRoot?: string; mainCheckout?: MainCheckoutHooks; keepRecords?: boolean }>;
   openclawHookDirs: Array<{ hooksDir: string; tool: string }>;
   opencodePluginDirs: string[];
-  ompHookFile: string | null;
+  ompHookFiles: string[];
   kiroHookFile: string | null;
   piHookFiles: string[];
   dshHookFile: string | null;
@@ -277,7 +282,7 @@ function hasToolResources(r: ToolResources): boolean {
     r.hookFiles.length > 0 ||
     r.openclawHookDirs.length > 0 ||
     r.opencodePluginDirs.length > 0 ||
-    r.ompHookFile !== null ||
+    r.ompHookFiles.length > 0 ||
     r.kiroHookFile !== null ||
     r.piHookFiles.length > 0 ||
     r.dshHookFile !== null ||
@@ -394,6 +399,19 @@ function isEmptyHooksResidue(parsed: Record<string, unknown> | null): boolean {
   return entries.length > 0 && entries.every((v) => Array.isArray(v) && v.length === 0);
 }
 
+/**
+ * Delete `file`, a standalone Copilot hook file teamai wrote, once removing
+ * teamai's entries left it holding only the events they emptied: Copilot runs
+ * nothing from it. A file git tracks stays, as the hook pass keeps it.
+ */
+async function removeEmptiedCopilotHookFile(file: string): Promise<void> {
+  const parsed = await readJson<Record<string, unknown>>(file);
+  if (parsed === null || !Object.keys(parsed).every((key) => key === 'version' || key === 'hooks') || !isEmptyHooksResidue(parsed)) return;
+  if (!await gitUntracked(file, 'entry')) return;
+  await remove(file);
+  log.success(`Removed ${file}: no hooks left in it`);
+}
+
 // ─── Discovery ─────────────────────────────────────────
 
 /**
@@ -439,6 +457,8 @@ async function discoverToolResources(
   rulesDirs: readonly string[],
   /** Directories `locate` says may hold `tool`'s hook adapter files: where pull writes them, and one it retired. */
   hookDirs: readonly string[],
+  /** The hook file `locate` says this scope's `hooks` path names: a team repo workspace's project file, else the tool's own. */
+  hookFile: string | null,
   teamSkillNames: Set<string>,
   /** Whether `tool`'s skill directory `dir`, at a name in `teamSkillNames`, is teamai's (#993). */
   ownsSkill: (dir: string, name: string, tool: string) => Promise<boolean>,
@@ -468,16 +488,16 @@ async function discoverToolResources(
   globalAdapters = scope === 'user',
 ): Promise<ToolResources> {
   const res: ToolResources = {
-    hookFiles: [], openclawHookDirs: [], opencodePluginDirs: [], ompHookFile: null, kiroHookFile: null, piHookFiles: [], dshHookFile: null,
+    hookFiles: [], openclawHookDirs: [], opencodePluginDirs: [], ompHookFiles: [], kiroHookFile: null, piHookFiles: [], dshHookFile: null,
     claudeMdFiles: [], retiredInstructionFiles: [], opencodeInstructions: [], keptGlobal: [], skillDirs: [], keptSkillDirs: [], keptFiles: [], ruleFiles: [], keptRuleFiles: [], opencodeOwnedGlobs: [], agentFiles: [],
   };
 
   // (a) Hooks — settings.json / hooks.json
   if (toolPath.hooks) {
-    const hooksPath = path.join(baseDir, toolPath.hooks);
+    const hooksPath = hookFile;
     const teamOnly = tool === 'copilot' && scope === 'project';
     // A project's Copilot file holds only team hooks, so lost records leave no marker behind (#993).
-    if (await pathExists(hooksPath)
+    if (hooksPath !== null && await pathExists(hooksPath)
       && (await hasTeamaiHooks(hooksPath, tool, standaloneHookManifestPath)
         || isEmptyHooksResidue(await readJson<Record<string, unknown>>(hooksPath))
         || await hasUnrecordedTeamHooks(hooksPath, tool, { teamHookHistory: hookTargets[0]?.teamHookHistory, teamOnly }))) {
@@ -533,12 +553,14 @@ async function discoverToolResources(
   } else if (tool === 'omp') {
     // OMP hooks are a single teamai-managed TS extension in the user agent dir
     // (~/.omp/agent/extensions/teamai-hooks.ts) — the adapter never writes a
-    // project copy, so there is just the one place to look.
+    // project copy. Pull writes the active profile's only: profiles run side by
+    // side, so a pull under another profile, or before a move, left one in each.
     const { hasOmpHooks, OMP_HOOK_FILE } = await import('./omp-hooks.js');
-    const extFile = path.join(hookAdapterDir('omp-extension'), OMP_HOOK_FILE);
-    if (await hasOmpHooks()) {
-      if (globalAdapters) res.ompHookFile = extFile;
-      else res.keptGlobal.push(extFile);
+    for (const home of await toolHomesAcrossProfiles('omp')) {
+      const dir = hookAdapterDirIn('omp-extension', home);
+      if (!await hasOmpHooks(dir)) continue;
+      if (globalAdapters) res.ompHookFiles.push(path.join(dir, OMP_HOOK_FILE));
+      else res.keptGlobal.push(path.join(dir, OMP_HOOK_FILE));
     }
   } else if (tool === 'pi') {
     const {
@@ -623,16 +645,16 @@ async function discoverToolResources(
         }
       }
     }
-  } else {
-    // OpenClaw-style agents (no settings file) inject a HOOK.md + handler.ts
-    // under <hooksDir>/<OPENCLAW_HOOK_DIR>. Check the default path, the
-    // resolved state dir (OPENCLAW_STATE_DIR or OPENCLAW_PROFILE), and the
-    // resolved workspace dir — injection now targets `<workspace>/hooks`, so
-    // teardown must cover it too, otherwise the hook is orphaned on uninstall.
+  } else if (OPENCLAW_TOOLS.has(tool)) {
+    // OpenClaw and its variants inject a HOOK.md + handler.ts under
+    // <hooksDir>/<OPENCLAW_HOOK_DIR>. Check the default path, the
+    // resolved state dir (OPENCLAW_STATE_DIR, OPENCLAW_HOME or OPENCLAW_PROFILE), and,
+    // for OpenClaw only, the resolved workspace dir: injection targets `<workspace>/hooks`
+    // for OpenClaw alone, so a variant's uninstall must not take OpenClaw's hook.
     const defaultHooksDir = path.join(baseDir, `.${tool}`, 'hooks');
     const resolvedHooksDir = resolveOpenClawHooksDir(tool);
     const dirsToCheck = new Set([defaultHooksDir, resolvedHooksDir]);
-    const workspaceDir = await resolveOpenclawWorkspaceDir();
+    const workspaceDir = tool === 'openclaw' ? await openclawWorkspaceDir() : null;
     if (workspaceDir) {
       dirsToCheck.add(path.join(workspaceDir, 'hooks'));
     }
@@ -855,6 +877,36 @@ async function sourceRecordsFor(readers: ReadonlyArray<LocalConfig[] | null>): P
     .map((record) => record.path);
 }
 
+/** Each of `homes` holding teamai's Hermes hook, plugin or config.yaml entries, with what goes from it. */
+async function hermesHooksIn(homes: readonly string[]): Promise<RemovalPlan['hermesHomes']> {
+  const { getInstructionsPluginDir, getReportScriptPath, hasHermesHooks, ownsInstructionsPlugin } = await import('./hermes-hooks.js');
+  const { getHermesAllowlistPath, getHermesConfigPath } = await import('./hermes-config.js');
+  const found: RemovalPlan['hermesHomes'] = [];
+  for (const home of homes) {
+    if (!await hasHermesHooks(home)) continue;
+    const plugin = getInstructionsPluginDir(home);
+    const lines = [
+      ...await pathExists(getReportScriptPath(home)) ? [getReportScriptPath(home)] : [],
+      ...await pathExists(plugin) && await ownsInstructionsPlugin(home) ? [`${plugin}/`] : [],
+    ];
+    const entries: string[] = [];
+    for (const file of [getHermesConfigPath(home), getHermesAllowlistPath(home)]) if (await pathExists(file)) entries.push(file);
+    if (entries.length > 0) lines.push(`teamai's entries in ${entries.join(' and ')}`);
+    found.push({ home, lines });
+  }
+  return found;
+}
+
+/** Each of `files` holding teamai's SOUL.md rules block, once. */
+async function hermesSoulsIn(files: ReadonlyArray<string | undefined>): Promise<string[]> {
+  const { readSoulRules } = await import('./hermes-config.js');
+  const found: string[] = [];
+  for (const file of files) {
+    if (file !== undefined && !found.includes(file) && await readSoulRules(file) !== null) found.push(file);
+  }
+  return found;
+}
+
 async function buildRemovalPlan(
   localConfig: LocalConfig,
   teamConfig: TeamaiConfig,
@@ -1026,17 +1078,20 @@ async function buildRemovalPlan(
   for (const [tool, toolPath] of Object.entries(toolPaths)) {
     const rulesDirs = cleanupOf(await locate(tool, 'rules', install)).flatMap((place) => place.kind === 'dir' ? [place.path] : []);
     rulesDirsByTool.set(tool, rulesDirs);
+    const hooks = await locate(tool, 'hooks', install);
     perTool.set(
       tool,
       await discoverToolResources(
         tool,
         toolPath,
-        resolveToolBaseDir(tool, localConfig),
+        // User-scope Copilot skills are relative to its home.
+        tool === COPILOT_TOOL_ID && localConfig.scope === 'user' ? toolHome(COPILOT_TOOL_ID) : resolveBaseDir(localConfig),
         baseDir,
         writesOf(await locate(tool, 'skills', install)).map((place) => place.path),
         await locate(tool, 'blocks', install),
         rulesDirs,
-        cleanupOf(await locate(tool, 'hooks', install)).flatMap((place) => place.kind === 'dir' ? [place.path] : []),
+        cleanupOf(hooks).flatMap((place) => place.kind === 'dir' ? [place.path] : []),
+        (workspaceHooksOf(hooks) ?? ownOf(hooks))?.path ?? null,
         teamSkillNames,
         ownsSkill,
         skillFiles,
@@ -1054,11 +1109,9 @@ async function buildRemovalPlan(
 
   // A project uninstall leaves Copilot's shared built-ins available to other projects.
   if (localConfig.scope === 'project' && primaryHookScope.scope === 'user') {
-    const userConfig = { ...localConfig, scope: primaryHookScope.scope };
-    const hooks = hookToolPaths.copilot?.hooks;
+    const file = hookToolPaths.copilot?.hooks === undefined ? undefined : ownOf(await locate(COPILOT_TOOL_ID, 'hooks', install))?.path;
     const res = perTool.get('copilot');
-    if (hooks && res) {
-      const file = path.join(resolveToolBaseDir('copilot', userConfig), hooks);
+    if (file !== undefined && res) {
       if (await pathExists(file) && await hasTeamaiHooks(file, 'copilot')) res.keptGlobal.push(file);
     }
   }
@@ -1102,7 +1155,7 @@ async function buildRemovalPlan(
     const { opencodeContextReference, readOpencodeInstructionList } = await import('./resources/opencode-config.js');
     const contextFile = ownOf(await locate('opencode', 'blocks', install))?.path;
     // Worktrees share state.json: only this checkout's own record counts.
-    const own = contextFile === undefined ? undefined : opencodeContextReference(contextFile, localConfig.scope, resolveToolBaseDir('opencode', localConfig));
+    const own = contextFile === undefined ? undefined : opencodeContextReference(contextFile, localConfig.scope, resolveBaseDir(localConfig));
     const recorded = (await loadStateForScope(localConfig)).opencodeContextEntries ?? [];
     if (own && recorded.some((ref) => ref.config === own.config && ref.entry === own.entry)) {
       const listed = await readOpencodeInstructionList(own.config);
@@ -1179,7 +1232,7 @@ async function buildRemovalPlan(
   for (const [tool, toolPath] of Object.entries(toolPaths)) {
     if (isAgentExcluded(localConfig, tool)) continue;
     const probePath = toolPath.skills ?? toolPath.rules ?? toolPath.settings ?? toolPath.claudemd;
-    if (probePath && await isToolInstalledForConfig(tool, probePath, localConfig)) {
+    if (probePath && isInstalledFor(await locate(tool, 'rules', install))) {
       activeTools.add(tool);
     }
   }
@@ -1212,7 +1265,7 @@ async function buildRemovalPlan(
     hookFiles: [],
     openclawHookDirs: [],
     opencodePluginDirs: [],
-    ompHookFile: null,
+    ompHookFiles: [],
     kiroHookFile: null,
     piHookFiles: [],
     dshHookFile: null,
@@ -1250,7 +1303,10 @@ async function buildRemovalPlan(
       : [],
     keptForProjects: projectsKept,
     includeShared,
-    hermesCleanup: globalAdapters && toolsToMerge.includes('hermes') && await (await import('./hermes-hooks.js')).hasHermesHooks(),
+    hermesHomes: globalAdapters && toolsToMerge.includes('hermes') ? await hermesHooksIn(await toolHomesAcrossProfiles('hermes')) : [],
+    hermesSouls: localConfig.scope === 'user' && toolsToMerge.includes('hermes')
+      ? await hermesSoulsIn([ownOf(await locate('hermes', 'blocks', install))?.path, ...(await toolHomesAcrossProfiles('hermes')).map((home) => path.join(home, 'SOUL.md'))])
+      : [],
     scope: localConfig.scope,
     globalAdapters,
     keptGlobal: [],
@@ -1292,9 +1348,12 @@ async function buildRemovalPlan(
   // project Trae and Trae CN share `.trae/skills` (#904), as Qoder and Qoder
   // CN share `.qoder/skills`.
   const retainedSkillDirs = new Set<string>();
+  // So do the agent files in it, as Trae and Trae CN share `.trae/agents`.
+  const retainedAgentFiles = new Set<string>();
   for (const [tool, resources] of perTool) {
     if (toolsToMerge.includes(tool) || !activeTools.has(tool)) continue;
     for (const entry of resources.skillDirs) retainedSkillDirs.add(entry.dir);
+    for (const file of resources.agentFiles) retainedAgentFiles.add(file);
   }
 
   // Merge tool-specific resources for selected tools. Entries a sibling
@@ -1306,7 +1365,7 @@ async function buildRemovalPlan(
     plan.hookFiles.push(...res.hookFiles);
     plan.openclawHookDirs.push(...res.openclawHookDirs);
     plan.opencodePluginDirs.push(...res.opencodePluginDirs);
-    if (res.ompHookFile) plan.ompHookFile = res.ompHookFile;
+    plan.ompHookFiles.push(...res.ompHookFiles);
     if (res.kiroHookFile) plan.kiroHookFile = res.kiroHookFile;
     plan.piHookFiles.push(...res.piHookFiles);
     if (res.dshHookFile) plan.dshHookFile = res.dshHookFile;
@@ -1345,9 +1404,14 @@ async function buildRemovalPlan(
     }
     plan.keptRuleFiles.push(...res.keptRuleFiles);
     plan.opencodeOwnedGlobs.push(...res.opencodeOwnedGlobs);
-    plan.agentFiles.push(...res.agentFiles);
+    for (const file of res.agentFiles) {
+      if (retainedAgentFiles.has(file)) retainedSharedEntries++;
+      else if (!plan.agentFiles.includes(file)) plan.agentFiles.push(file);
+    }
   }
   plan.sharedRetentionOnly = agentFilter !== undefined && retainedSharedEntries > 0;
+  // The active home's SOUL.md is an instruction file already, which loses the block with the others.
+  plan.hermesSouls = plan.hermesSouls.filter((file) => !plan.claudeMdFiles.some((entry) => entry.path === file));
 
   // Hermes' plugin is machine-wide too: a project uninstall names it as kept.
   if (!globalAdapters && toolsToMerge.includes('hermes')) {
@@ -1472,11 +1536,12 @@ function isPlanEmpty(plan: RemovalPlan): boolean {
     plan.hookFiles.length === 0 &&
     plan.openclawHookDirs.length === 0 &&
     plan.opencodePluginDirs.length === 0 &&
-    plan.ompHookFile === null &&
+    plan.ompHookFiles.length === 0 &&
     plan.kiroHookFile === null &&
     plan.piHookFiles.length === 0 &&
     plan.dshHookFile === null &&
-    !plan.hermesCleanup &&
+    plan.hermesHomes.length === 0 &&
+    plan.hermesSouls.length === 0 &&
     plan.claudeMdFiles.length === 0 &&
     plan.opencodeInstructions.length === 0 &&
     plan.skillDirs.length === 0 &&
@@ -1537,9 +1602,23 @@ function printSummary(plan: RemovalPlan, agentFilter?: string): void {
     console.log('');
   }
 
-  if (plan.ompHookFile !== null) {
-    console.log('   OMP Hook (extension):');
-    console.log(`     ${plan.ompHookFile}`);
+  if (plan.ompHookFiles.length > 0) {
+    console.log(`   OMP Hooks (${plan.ompHookFiles.length} extensions):`);
+    for (const file of plan.ompHookFiles) console.log(`     ${file}`);
+    console.log('');
+  }
+
+  if (plan.hermesHomes.length > 0) {
+    console.log(`   Hermes Hooks (${plan.hermesHomes.length} homes):`);
+    for (const { lines } of plan.hermesHomes) {
+      for (const line of lines) console.log(`     ${line}`);
+    }
+    console.log('');
+  }
+
+  if (plan.hermesSouls.length > 0) {
+    console.log(`   Hermes SOUL.md blocks (${plan.hermesSouls.length} files):`);
+    for (const file of plan.hermesSouls) console.log(`     ${file}`);
     console.log('');
   }
   if (plan.kiroHookFile !== null) console.log(`   Kiro Hooks: ${plan.kiroHookFile}`);
@@ -2078,6 +2157,7 @@ async function executeRemoval(
         } : {}),
         ...(teamHookProjectRoot ? { teamHookProjectRoot } : {}),
       });
+      if (hookFormatOf(tool) === 'copilot') await removeEmptiedCopilotHookFile(settingsPath);
     } catch (e) {
       failedRecords.add(records);
       log.warn(`Failed to remove hooks from ${settingsPath}: ${(e as Error).message}`);
@@ -2152,13 +2232,13 @@ async function executeRemoval(
     }
   }
 
-  // (a2c) Remove the teamai OMP extension (single user-agent-dir copy).
-  if (plan.ompHookFile !== null) {
+  // (a2c) Remove the teamai OMP extension from each profile that has one.
+  for (const file of plan.ompHookFiles) {
     try {
       const { removeOmpHooks } = await import('./omp-hooks.js');
-      await removeOmpHooks();
+      await removeOmpHooks(path.dirname(file));
     } catch (e) {
-      log.warn(`Failed to remove OMP hook: ${(e as Error).message}`);
+      log.warn(`Failed to remove OMP hook ${file}: ${(e as Error).message}`);
     }
   }
 
@@ -2442,16 +2522,15 @@ async function executeRemoval(
     }
   }
 
-  // (h) Hermes: clear teamai-managed entries — the SOUL.md rules block (user scope), the
-  // status-report hook (config.yaml + allowlist + script). Gated on hermesCleanup
-  // so a targeted `--agent <other>` uninstall never touches ~/.hermes. No-op safe.
-  if (plan.hermesCleanup) {
+  // (h) Hermes: clear teamai-managed entries — the SOUL.md rules blocks (user scope), the
+  // status-report hook (config.yaml + allowlist + script) and the plugin, in each home the plan
+  // found them. A targeted `--agent <other>` uninstall finds none, so never touches ~/.hermes.
+  if (plan.hermesHomes.length > 0 || plan.hermesSouls.length > 0) {
     try {
       const { removeHermesHooks } = await import('./hermes-hooks.js');
       const { removeSoulRules } = await import('./hermes-config.js');
-      await removeHermesHooks();
-      // SOUL.md is global and only a user-scope pull writes its rules block (#946).
-      if (plan.scope === 'user') await removeSoulRules();
+      for (const { home } of plan.hermesHomes) await removeHermesHooks(home);
+      for (const soul of plan.hermesSouls) await removeSoulRules(soul);
     } catch (e) {
       log.debug(`Hermes uninstall cleanup skipped: ${(e as Error).message}`);
     }

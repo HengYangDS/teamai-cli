@@ -18,10 +18,31 @@ export type HomeMove =
   | { readonly kind: 'env'; readonly name: string; readonly evidence: Evidence }
   /** `$XDG_CONFIG_HOME/<child>`. */
   | { readonly kind: 'xdg'; readonly child: string; readonly evidence: Evidence }
-  /** `%LOCALAPPDATA%\<child>` on Windows, whatever the env says. */
-  | { readonly kind: 'win32-appdata'; readonly child: string; readonly evidence: Evidence }
-  /** `~/<dir>-<value>` for a value other than `default`. */
-  | { readonly kind: 'profile-suffix'; readonly name: string; readonly evidence: Evidence };
+  /**
+   * OpenClaw's state dir: `OPENCLAW_STATE_DIR`, else `.openclaw`, or
+   * `.openclaw-<profile>` for an `OPENCLAW_PROFILE` other than `default`, in
+   * `OPENCLAW_HOME`, else in `$HOME`. `OPENCLAW_HOME` replaces the OS home
+   * OpenClaw's defaults use, `~` in `OPENCLAW_STATE_DIR` included.
+   */
+  | { readonly kind: 'openclaw-state'; readonly evidence: Evidence }
+  /**
+   * Oh My Pi's agent dir. The profile is `OMP_PROFILE` when defined, even
+   * empty, else `PI_PROFILE`; a blank or `default` one is the default profile.
+   * A named profile is `~/<PI_CONFIG_DIR or .omp>/profiles/<name>/agent`; the
+   * default one is `~/<PI_CONFIG_DIR or .omp>/agent`.
+   */
+  | { readonly kind: 'omp-agent'; readonly evidence: Evidence }
+  /**
+   * Hermes's home: `HERMES_HOME`, else `~/.hermes<suffix>`, or
+   * `%LOCALAPPDATA%\hermes<suffix>` on Windows, with `HERMES_DATA_DIR_SUFFIX`
+   * appended as written. Unless `HERMES_HOME` is itself a `profiles/<name>`
+   * dir, a profile `active_profile` names, other than `default`, is
+   * `profiles/<name>` in that home while the directory exists; the
+   * `active_profile` read is the platform one when `HERMES_HOME` is inside it.
+   * The profile is applied on every run, inside a recorded home too, and never
+   * recorded: Hermes rewrites `active_profile` outside any shell.
+   */
+  | { readonly kind: 'hermes-home'; readonly evidence: Evidence };
 
 /**
  * `dir` is relative to `$HOME`. The first of `moves.by` that applies moves the
@@ -195,6 +216,12 @@ export type HookAdapter = { readonly channel: 'adapter'; readonly adapter: HookA
 export type HooksChannels = {
   readonly user: HookSettings<HomeRead> | HookAdapter | 'none' | 'unknown';
   readonly self: HookSettings<HomeRead | ProjectRead> | 'user' | 'none' | 'unknown';
+  /**
+   * A workspace of a team repo also takes the team's hooks in this project
+   * file, while the user hooks keep the built-ins (Copilot's
+   * `.github/hooks/teamai.json`). Absent: the workspace takes the user hooks only.
+   */
+  readonly workspace?: HookSettings<ProjectRead>;
 };
 
 /**
@@ -547,7 +574,11 @@ export const TOOLS = {
       user: { format: 'copilot', reads: [{ base: 'home', path: '.copilot/mcp-config.json', evidence: 'verified' }] },
       project: { format: 'copilot', reads: [{ base: 'project', path: '.github/mcp.json', when: 'workspaceUnder', evidence: 'verified' }] },
     },
-    hooks: { user: { channel: 'settings', format: 'copilot', reads: [{ base: 'home', path: '.copilot/hooks/teamai.json', evidence: 'source' }] }, self: { channel: 'settings', format: 'copilot', reads: [{ base: 'project', path: '.github/hooks/teamai.json', when: 'workspaceUnder', evidence: 'source' }] } },
+    hooks: {
+      user: { channel: 'settings', format: 'copilot', reads: [{ base: 'home', path: '.copilot/hooks/teamai.json', evidence: 'source' }] },
+      self: { channel: 'settings', format: 'copilot', reads: [{ base: 'project', path: '.github/hooks/teamai.json', when: 'workspaceUnder', evidence: 'source' }] },
+      workspace: { channel: 'settings', format: 'copilot', reads: [{ base: 'project', path: '.github/hooks/teamai.json', when: 'workspaceUnder', evidence: 'source' }] },
+    },
     sessions: 'none',
     launch: 'copilot',
     features: {
@@ -700,7 +731,12 @@ export const TOOLS = {
       project: { channel: 'dir', format: 'trae', reads: [{ base: 'project', path: '.trae/rules', when: 'workspaceUnder', evidence: 'assumed' }] },
     },
     blocks: NONE,
-    agents: UNKNOWN,
+    // Trae loads `.trae/agents` only while its Beta "Enable Subagents Directory" switch is on, a setting teamai cannot read.
+    agents: {
+      // Its docs give ~/.trae-cn/agents, a copy of Trae CN's page; nothing shows ~/.trae/agents.
+      user: 'unknown',
+      project: { reads: [{ base: 'project', path: '.trae/agents', when: 'cwdOnly', evidence: 'source' }] },
+    },
     mcp: {
       user: 'none',
       project: { format: 'claude', reads: [{ base: 'project', path: '.trae/mcp.json', when: 'workspaceUnder', evidence: 'docs' }] },
@@ -730,7 +766,11 @@ export const TOOLS = {
       project: { channel: 'dir', format: 'trae', reads: [{ base: 'project', path: '.trae/rules', when: 'workspaceUnder', evidence: 'assumed' }] },
     },
     blocks: NONE,
-    agents: UNKNOWN,
+    // Trae CN loads them only while its Beta "Enable Subagents Directory" switch is on (on by default, its docs say).
+    agents: {
+      user: { reads: [{ base: 'home', path: '.trae-cn/agents', evidence: 'docs' }] },
+      project: { reads: [{ base: 'project', path: '.trae/agents', when: 'cwdOnly', evidence: 'source' }] },
+    },
     mcp: {
       user: 'none',
       project: { format: 'claude', reads: [{ base: 'project', path: '.trae/mcp.json', when: 'workspaceUnder', evidence: 'docs' }] },
@@ -788,8 +828,12 @@ export const TOOLS = {
     },
   },
   // Extensions capture the installed Node/CLI launcher instead of depending on the host PATH.
+  // utils/src/dirs.ts at a70f001c. A `--profile` flag another process starts with is out of teamai's sight: init records the home for it.
+  // OMP also reads PI_CODING_AGENT_DIR for its default profile. teamai does not follow it: Pi owns that directory, and both
+  // tools' files there, the hook extension's one name included, would overwrite each other.
+  // No `defaultHomeLeftovers`: members run profiles side by side, so ~/.omp/agent is the live default profile.
   omp: {
-    home: { dir: '.omp' },
+    home: { dir: '.omp', moves: { root: '.omp/agent', by: [{ kind: 'omp-agent', evidence: 'source' }] } },
     skillLoad: { calls: [] },
     skills: { user: [{ base: 'home', path: '.omp/agent/skills', evidence: 'verified' }], project: 'unknown' },
     rules: {
@@ -914,7 +958,8 @@ export const TOOLS = {
   openclaw: {
     home: {
       dir: '.openclaw',
-      moves: { by: [{ kind: 'env', name: 'OPENCLAW_STATE_DIR', evidence: 'source' }, { kind: 'profile-suffix', name: 'OPENCLAW_PROFILE', evidence: 'source' }] },
+      // docs.openclaw.ai/help/environment; OPENCLAW_STATE_DIR and OPENCLAW_PROFILE also in src/config/paths.ts at 884a96d1.
+      moves: { by: [{ kind: 'openclaw-state', evidence: 'docs' }] },
     },
     skillLoad: 'unknown',
     skills: UNKNOWN_READS,
@@ -943,12 +988,10 @@ export const TOOLS = {
       agentHooks: '◐s',
     },
   },
-  // hermes_constants.py: HERMES_HOME, else %LOCALAPPDATA%\hermes on Windows, else ~/.hermes. Hermes reads it in either scope.
+  // hermes_constants.py and hermes_cli/main.py at 68134629 (the same rules at 7e9eb8d9). Hermes reads its home in either scope.
+  // Out of teamai's sight: another process's -p/--profile flag, and the supervised, desktop SSH and s6 gateway starts that skip active_profile.
   hermes: {
-    home: {
-      dir: '.hermes',
-      moves: { by: [{ kind: 'env', name: 'HERMES_HOME', evidence: 'source' }, { kind: 'win32-appdata', child: 'hermes', evidence: 'source' }] },
-    },
+    home: { dir: '.hermes', moves: { by: [{ kind: 'hermes-home', evidence: 'source' }] } },
     skillLoad: 'unknown',
     skills: {
       user: [{ base: 'home', path: '.hermes/skills', evidence: 'source' }],
@@ -1174,18 +1217,21 @@ export function hasDefaultHomeLeftovers(tool: ToolId): boolean {
   return home.moves?.defaultHomeLeftovers === true;
 }
 
-/** The env variables that move `tool`'s home (`Home.moves.by`): a tool's own, and `XDG_CONFIG_HOME` for an XDG home. */
+/** The env variables that move `tool`'s home (`Home.moves.by`): a tool's own, and `XDG_CONFIG_HOME` for an XDG home. `LOCALAPPDATA` is not one: it is where Windows keeps a home that did not move. */
 export function homeVariables(tool: ToolId): readonly string[] {
   const { home }: ToolDescriptor = TOOLS[tool];
   return (home.moves?.by ?? []).flatMap((move): string[] => {
     switch (move.kind) {
       case 'env':
-      case 'profile-suffix':
         return [move.name];
       case 'xdg':
         return ['XDG_CONFIG_HOME'];
-      case 'win32-appdata':
-        return [];
+      case 'openclaw-state':
+        return ['OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_PROFILE'];
+      case 'omp-agent':
+        return ['OMP_PROFILE', 'PI_PROFILE', 'PI_CONFIG_DIR'];
+      case 'hermes-home':
+        return ['HERMES_HOME', 'HERMES_DATA_DIR_SUFFIX'];
       default: {
         const unhandled: never = move;
         return unhandled;

@@ -4,7 +4,6 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { getUserHome, expandHome } from './utils/home.js';
 import { log } from './utils/logger.js';
-import { realHost, toolHome } from './tool-home.js';
 import { channelsOf } from './tools.js';
 import type { WorkspaceChildren } from './workspace-children.js';
 import type { HeadState } from './utils/git.js';
@@ -561,11 +560,12 @@ export const DEFAULT_TOOL_PATHS = {
   // teamai-writable cross-platform file: the IDE keeps it next to its
   // user settings (~/Library/Application Support/Trae/User/mcp.json on
   // macOS, %APPDATA%/… on Windows), so only `mcpProject` is set. Trae has
-  // no settings-based hook surface and no subagents directory, so those
-  // keys stay absent (like JoyCode, users sync via `teamai pull`).
+  // no settings-based hook surface, so that key stays absent. Subagents are
+  // Markdown in <root>/.trae/agents (Trae 3.5.67).
   trae: {
     skills: '.trae/skills',
     rules: '.trae/rules',
+    agents: '.trae/agents',
     mcpProject: '.trae/mcp.json',
     userScope: { rules: '.trae/user_rules' },
   },
@@ -578,10 +578,12 @@ export const DEFAULT_TOOL_PATHS = {
   'trae-cn': {
     skills: '.trae/skills',
     rules: '.trae/rules',
+    agents: '.trae/agents',
     mcpProject: '.trae/mcp.json',
     userScope: {
       skills: '.trae-cn/skills',
       rules: '.trae-cn/user_rules',
+      agents: '.trae-cn/agents',
     },
   },
   // ZCode: user-level config lives at ~/.zcode/cli/config.json (a shared file
@@ -603,8 +605,8 @@ export const DEFAULT_TOOL_PATHS = {
   // extensions rather than a settings hook list, so there is no `settings`
   // path — the adapter in omp-hooks.ts writes the single user-root extension
   // (~/.omp/agent/extensions/teamai-hooks.ts). Profiles (OMP_PROFILE /
-  // PI_CODING_AGENT_DIR / PI_CONFIG_DIR) move the agent dir and are not
-  // supported for hooks.
+  // PI_PROFILE) and PI_CONFIG_DIR move the agent dir, and these user paths
+  // with it; PI_CODING_AGENT_DIR does not, as Pi owns it (`TOOLS.omp.home`).
   omp: {
     skills: '.omp/skills',
     rules: '.omp/rules',
@@ -649,7 +651,7 @@ export const DEFAULT_TOOL_PATHS = {
   // WorkBuddy runs CodeBuddy's engine: in a project it reads CodeBuddy's
   // .codebuddy/rules, which the two share (one copy), and in user scope its
   // own ~/.workbuddy/rules (#946). Its install probe stays .workbuddy
-  // (`isToolInstalledForConfig`), whatever directory its rules land in.
+  // (`locate`'s install gate), whatever directory its rules land in.
   workbuddy: {
     skills: '.workbuddy/skills',
     rules: '.codebuddy/rules',
@@ -2639,11 +2641,6 @@ export function resolveBaseDir(localConfig: Pick<LocalConfig, 'scope' | 'project
 
 export const COPILOT_TOOL_ID = 'copilot';
 
-/** GitHub Copilot CLI's user configuration root: the recorded one (`toolHome`), else COPILOT_HOME, else `~/.copilot`. */
-export function getCopilotHome(env: NodeJS.ProcessEnv = process.env): string {
-  return toolHome(COPILOT_TOOL_ID, realHost({ env }));
-}
-
 export const CLAUDE_TOOL_ID = 'claude';
 
 /** The `toolPaths.claude` root segment Claude Code uses when it is not relocated. */
@@ -2831,12 +2828,6 @@ export function cursorConfigDir(toolRoots?: Record<string, string>): string {
   const xdg = process.env.XDG_CONFIG_HOME?.trim();
   if (xdg) return path.join(expandHome(xdg), 'cursor');
   return path.join(getUserHome(), DEFAULT_CURSOR_ROOT);
-}
-
-/** Base directory for one tool's resources in the active scope. */
-export function resolveToolBaseDir(tool: string, localConfig: LocalConfig): string {
-  if (tool === COPILOT_TOOL_ID && localConfig.scope === 'user') return getCopilotHome();
-  return resolveBaseDir(localConfig);
 }
 
 /** True when `tool` is in localConfig.disabledAgents (excluded from teamai sync). */

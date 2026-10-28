@@ -763,6 +763,16 @@ describe('doctor — where a tool takes skills', () => {
     expect((await failing()).map((c) => c.name)).not.toContain('opencode home matches XDG_CONFIG_HOME');
   });
 
+  it('leaves a recorded Hermes home alone when only active_profile names another', async () => {
+    const recorded = path.join(tempDir, 'recorded', 'hermes');
+    await fse.ensureDir(recorded);
+    await saveToolHomes({ hermes: recorded });
+    await fse.ensureDir(path.join(homeDir, '.hermes', 'profiles', 'work'));
+    await fse.writeFile(path.join(homeDir, '.hermes', 'active_profile'), 'work\n');
+
+    expect((await failing()).map((c) => c.name).filter((name) => name.startsWith('hermes home'))).toEqual([]);
+  });
+
   it('fails when the home recorded for a tool is gone, whatever the shell says', async () => {
     const recorded = path.join(tempDir, 'recorded', 'opencode');
     await saveToolHomes({ opencode: recorded });
@@ -816,14 +826,62 @@ describe('doctor — where a tool takes skills', () => {
     expect(notes?.filter((note) => note.startsWith('pi '))).toEqual([]);
   });
 
-  it('notes a project directory a tool reads only from a session started at the project root', async () => {
-    const project = path.join(tempDir, 'project');
+  /** The report doctor gives when run from each of `dirs`. */
+  async function reportsFrom(dirs: readonly string[]): Promise<DoctorReport[]> {
+    const cwd = process.cwd();
+    const reports: DoctorReport[] = [];
+    try {
+      for (const dir of dirs) {
+        await fse.ensureDir(dir);
+        process.chdir(dir);
+        reports.push(await report());
+      }
+    } finally {
+      process.chdir(cwd);
+    }
+    return reports;
+  }
+
+  it('notes a project directory a tool reads only from a session started at the project root, and judges its reads from there, whatever directory doctor runs from', async () => {
+    const project = path.join(await fse.realpath(tempDir), 'project');
     await fse.ensureDir(path.join(project, '.pi'));
     Object.assign(localConfig, { scope: 'project', projectRoot: project });
     teamConfig.toolPaths = { pi: { skills: '.pi/skills' } };
 
-    const { notes } = await report();
+    const [atRoot, inSubdir, elsewhere] = await reportsFrom([project, path.join(project, 'src'), path.join(tempDir, 'elsewhere')]);
 
-    expect(notes).toContain(`pi reads project skills only from a session started in ${project}.`);
+    expect(atRoot.notes).toContain(`pi reads project skills only from a session started in ${project}.`);
+    expect([inSubdir.notes, elsewhere.notes]).toEqual([atRoot.notes, atRoot.notes]);
+    const readChecks = ({ checks }: DoctorReport) => checks.filter((check) => check.name.includes(' reads the '));
+    expect(readChecks(atRoot).map((check) => check.name)).toEqual(['pi reads the skills teamai writes']);
+    expect(readChecks(atRoot).map((check) => check.ok)).toEqual([true]);
+    expect([readChecks(inSubdir), readChecks(elsewhere)]).toEqual([readChecks(atRoot), readChecks(atRoot)]);
+  });
+
+  it('names no project read that every session in the project makes, whatever directory doctor runs from', async () => {
+    const project = path.join(await fse.realpath(tempDir), 'project');
+    await fse.ensureDir(path.join(project, '.claude'));
+    Object.assign(localConfig, { scope: 'project', projectRoot: project });
+    teamConfig.toolPaths = { claude: { skills: '.claude/skills', rules: '.claude/rules' } };
+    await fse.outputFile(path.join(tempDir, 'team-repo', 'rules', 'style.md'), '# Style\n');
+
+    const [atRoot, inSubdir] = await reportsFrom([project, path.join(project, 'src')]);
+
+    expect(atRoot.notes?.filter((note) => note.startsWith('claude reads '))).toEqual([]);
+    expect(inSubdir.notes).toEqual(atRoot.notes);
+  });
+
+  it('notes a user read limited to sessions under a directory, whatever directory doctor runs from', async () => {
+    teamConfig.toolPaths = { cursor: { rules: '.cursor/rules' } };
+    await fse.ensureDir(path.join(homeDir, '.cursor'));
+    await fse.outputFile(path.join(tempDir, 'team-repo', 'rules', 'style.md'), '# Style\n');
+    // A session directory is real, so the home it is compared with must be too (macOS links /var).
+    const home = await fse.realpath(homeDir);
+    vi.stubEnv('HOME', home);
+
+    const [underHome, outsideHome] = await reportsFrom([path.join(home, 'work'), path.join(await fse.realpath(tempDir), 'outside')]);
+
+    expect(underHome.notes).toContain(`cursor reads ${path.join(home, '.cursor', 'rules')} only from sessions under ${home}.`);
+    expect(outsideHome.notes).toEqual(underHome.notes);
   });
 });
