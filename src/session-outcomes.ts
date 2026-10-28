@@ -2,7 +2,7 @@
  * What the member's finished sessions delivered, folded into the usage report once each (#1387).
  *
  *   report ─ fold(): each member session of the scope's log → its facts in reported-outcomes.json, until it is
- *            │       finished (6 hours idle); a finished one gets its outcomes (learnings recorded for it, commits
+ *            │       finished (6 hours idle, or unattended at a drain); a finished one gets its outcomes (learnings recorded for it, commits
  *            │       its member made, the open pull request holding one, as a report found it) and adds to its
  *            │       (run mode, kind) rows
  *            └ push confirmed ─ markReported(): flagged reported, and a `counted` session outcome event written
@@ -21,7 +21,7 @@ import { interventionsEntry, promptTokensEntry, snapshotPathIn, type ReportedInt
 import { FINISHED_AFTER_MS } from './session-flow/session-work.js';
 import { getDataHome, type DashboardEvent, type LocalConfig, type UserOutcomeStats } from './types.js';
 import { pathExists, readJson, writeJson } from './utils/fs.js';
-import { checkoutForProjectAnchor, getDefaultBranch } from './utils/git.js';
+import { checkoutForProjectAnchor, getCurrentBranch, getDefaultBranch, getHeadCommit } from './utils/git.js';
 import { log } from './utils/logger.js';
 import { CommitIdSchema } from './workflow/delivery-schema.js';
 import { findDelivered } from './workflow/pr-delivery.js';
@@ -74,6 +74,11 @@ export interface FoldInput {
    */
   totals: { promptTokens: ReportedPromptTokens; interventions: ReportedInterventions };
   now: number;
+  /**
+   * Set when `teamai score --drain` makes this report, which ends the job of every unattended session here (#1385).
+   * `running` is the agent session that runs it: its last turn has no Stop yet, so its checkout is read now.
+   */
+  drain?: { running?: string };
 }
 
 function baselinePath(config: LocalConfig): string {
@@ -86,8 +91,13 @@ async function readBaseline(config: LocalConfig): Promise<Record<string, Entry> 
   return parsed.success ? parsed.data : undefined;
 }
 
-function isFinished(facts: Facts, now: number): boolean {
+function isIdle(facts: Facts, now: number): boolean {
   return Date.parse(facts.activeAt) + FINISHED_AFTER_MS <= now;
+}
+
+/** Idle for 6 hours, or unattended at a drain: an ephemeral runner's sessions are counted before the job ends. */
+function isFinished(facts: Facts, { now, drain }: Pick<FoldInput, 'now' | 'drain'>): boolean {
+  return isIdle(facts, now) || (drain !== undefined && facts.runMode === 'unattended');
 }
 
 /** The facts the scope's member events give each session, merged over what an earlier report kept. */
@@ -156,6 +166,12 @@ async function checkoutOf(facts: Facts): Promise<string | undefined> {
   return facts.anchor ? await checkoutForProjectAnchor(facts.anchor) ?? undefined : undefined;
 }
 
+/** `facts` with the head and branch `cwd` has checked out now, as its Stop would record them. */
+async function withHeadNow(facts: Facts, cwd: string): Promise<Facts> {
+  const [head, branch] = await Promise.all([getHeadCommit(cwd), getCurrentBranch(cwd)]);
+  return head ? { ...facts, endHead: head, ...(branch ? { endBranch: branch } : {}) } : facts;
+}
+
 /** The commits the member authored in `cwd`, the session's checkout, from its start to its last Stop, oldest first. */
 async function sessionCommits(cwd: string, facts: Facts): Promise<string[]> {
   const { startHead, endHead, startedAt } = facts;
@@ -221,7 +237,8 @@ async function fold(input: FoldInput): Promise<OutcomeFold> {
     const entry = baseline[sessionId];
     if (entry?.reported) continue;
     const facts = merged(entry?.facts, seen);
-    if (kept === undefined && isFinished(facts, input.now)) {
+    // A drain's first report is an ephemeral runner's every report, so only idle sessions are an earlier release's.
+    if (kept === undefined && isIdle(facts, input.now)) {
       baseline[sessionId] = { reported: true };
     } else if (JSON.stringify(facts) !== JSON.stringify(entry?.facts)) {
       baseline[sessionId] = { reported: false, facts };
@@ -231,14 +248,15 @@ async function fold(input: FoldInput): Promise<OutcomeFold> {
   if (changed) await writeJson(baselinePath(input.config), baseline);
 
   const pending = Object.entries(baseline).flatMap(([sessionId, entry]) =>
-    (entry.reported ? [] : [{ sessionId, facts: entry.facts, isDue: isFinished(entry.facts, input.now) }]));
+    (entry.reported ? [] : [{ sessionId, facts: entry.facts, isDue: isFinished(entry.facts, input) }]));
   // A session's pull request is looked up at each report until one is found, so one merged before the session is
   // finished still counts, and once more when it is; the answer is kept for a report whose push fails.
   const prs = await readPrCache(input.config);
   let prsChanged = false;
   // Each lookup may wait on a host, so they run together; one that fails leaves its pull request out.
-  const finished = (await Promise.all(pending.map(async ({ sessionId, facts, isDue }): Promise<FinishedSession[]> => {
-    const cwd = await checkoutOf(facts);
+  const finished = (await Promise.all(pending.map(async ({ sessionId, facts: kept, isDue }): Promise<FinishedSession[]> => {
+    const cwd = await checkoutOf(kept);
+    const facts = cwd && isDue && sessionId === input.drain?.running ? await withHeadNow(kept, cwd) : kept;
     const commits = cwd ? await sessionCommits(cwd, facts) : [];
     // A session that has since stopped on another branch is asked about that one.
     if (cwd && commits.length > 0 && facts.endBranch && prs[sessionId]?.branch !== facts.endBranch) {
