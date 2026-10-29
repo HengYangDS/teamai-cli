@@ -706,8 +706,9 @@ export async function pushLearningToOrigin(
 }
 
 /**
- * Best-effort push all changes in a team repo clone.
- * Logs other push failures; refuses detached team clones.
+ * Push all changes in a team repo clone.
+ * Refuses detached team clones. Throws when the push fails (a moved `main`, a protected
+ * branch, a hook rejection), so a caller never reports a publish that did not happen.
  * @deprecated Use autoPushViaMR instead for import flows.
  */
 export async function autoPushTeamRepo(repoPath: string, message: string): Promise<void> {
@@ -715,7 +716,16 @@ export async function autoPushTeamRepo(repoPath: string, message: string): Promi
     await pushRepoDirectly(repoPath, message, ['.']);
   } catch (err) {
     DetachedTeamRepoError.rethrow(err);
-    log.warn(`[git] autoPush failed (non-blocking): ${(err as Error).message}`);
+    const lines = (err as Error).message.split('\n').map(line => line.trim()).filter(Boolean);
+    // Keep the lines that say why git refused: the `! [rejected]` ref line (fetch first,
+    // pre-receive hook declined, protected branch), the hook's `remote:` output and the generic
+    // error:/fatal: line. git prints the remote URL first, which is not a cause.
+    const reasonLines = lines.filter(line => /^(error|fatal|remote):/.test(line) || /^!\s/.test(line) || /\[(remote )?rejected\]/.test(line));
+    const reason = (reasonLines.length > 0 ? reasonLines : lines.slice(0, 1)).join('\n') || 'unknown error';
+    // Only a stale clone is fixed by pulling; a protected branch or a hook rejection is not.
+    const stale = /\(fetch first\)|\(non-fast-forward\)/.test((err as Error).message);
+    const advice = stale ? '\nRun `teamai pull`, then rerun this command.' : '';
+    throw new Error(`Push to the team repo failed: ${reason}${advice}`, { cause: err });
   }
 }
 
