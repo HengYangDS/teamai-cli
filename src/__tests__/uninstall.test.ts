@@ -1566,6 +1566,84 @@ describe('uninstall', () => {
     expect(warn.mock.calls.some(([message]) => String(message).startsWith(`Kept ${flat}`))).toBe(named);
   });
 
+  it('uninstalling OMP removes the team hooks teamai\'s bridge runs for it, and leaves OpenCode\'s', async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const { injectOmpHooks } = await import('../omp-hooks.js');
+    await injectOmpHooks();
+    // OpenCode keeps its own hooks, so OMP is not the last tool and ~/.teamai stays.
+    const { injectOpencodeHooks } = await import('../opencode-hooks.js');
+    await injectOpencodeHooks(homeDir, 'user');
+    const { bridgedTeamHookFile } = await import('../bridged-team-hooks.js');
+    const hooks = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }], description: '[teamai:hook:x] x' }] } };
+    await fse.outputJson(bridgedTeamHookFile('omp'), hooks);
+    await fse.outputJson(bridgedTeamHookFile('opencode'), hooks);
+    const localConfig = makeLocalConfig(homeDir, repoPath, { enabledAgents: ['omp', 'opencode'] });
+    const defaults = TeamaiConfigSchema.parse({ team: 't', repo: 'owner/repo' }).toolPaths;
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig: makeTeamConfig({ toolPaths: { omp: defaults.omp, opencode: defaults.opencode } }) });
+
+    await uninstall({ force: true, agent: 'omp' });
+
+    expect(await fse.pathExists(bridgedTeamHookFile('omp'))).toBe(false);
+    expect(await fse.pathExists(bridgedTeamHookFile('opencode'))).toBe(true);
+  });
+
+  it('uninstalling Kiro with an agent hook recorded for it leaves none of teamai\'s Kiro hooks', async () => {
+    const { homeDir, repoPath } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    await fse.ensureDir(path.join(homeDir, '.kiro'));
+    const actualHooks = await vi.importActual<typeof import('../hooks.js')>('../hooks.js');
+    mockReconcileHooks.mockImplementation(actualHooks.reconcileHooks);
+    const { injectKiroHooks, kiroHookFile } = await import('../kiro-hooks.js');
+    await injectKiroHooks();
+    await actualHooks.applyBridgedAgentHook('kiro', { slug: 'no-rm', event: 'PreToolUse', matcher: 'Bash', command: 'exit 2' });
+    await fse.outputJson(path.join(homeDir, '.teamai', 'local-agent', 'agent-hooks.json'), {
+      'no-rm': { tool: 'kiro', event: 'PreToolUse', matcher: 'Bash', command: 'exit 2' },
+    });
+    // OpenCode keeps its own hooks, so Kiro is not the last tool and ~/.teamai stays.
+    const { injectOpencodeHooks } = await import('../opencode-hooks.js');
+    await injectOpencodeHooks(homeDir, 'user');
+    const localConfig = makeLocalConfig(homeDir, repoPath, { enabledAgents: ['kiro', 'opencode'] });
+    const defaults = TeamaiConfigSchema.parse({ team: 't', repo: 'owner/repo' }).toolPaths;
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig: makeTeamConfig({ toolPaths: { kiro: defaults.kiro, opencode: defaults.opencode } }) });
+
+    await uninstall({ force: true, agent: 'kiro' });
+
+    expect(await fse.readdir(path.dirname(kiroHookFile())).catch(() => [])).toEqual([]);
+  });
+
+  it('a project uninstall of OMP takes that project\'s team hooks out of the file teamai\'s bridge runs, and keeps the agent\'s', async () => {
+    const homeDir = path.join(tmpDir, 'home');
+    const projectRoot = path.join(tmpDir, 'project');
+    const repoPath = path.join(projectRoot, '.teamai', 'team-repo');
+    await fse.ensureDir(repoPath);
+    await fse.ensureDir(path.join(homeDir, '.omp', 'agent'));
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '/bin/zsh');
+    const actualHooks = await vi.importActual<typeof import('../hooks.js')>('../hooks.js');
+    mockReconcileHooks.mockImplementation(actualHooks.reconcileHooks);
+    const { getUserManagedHooksPath } = await import('../types.js');
+    const { runBridgedTeamHooks } = await import('../bridged-team-hooks.js');
+    await actualHooks.reconcileHooksToAllTools({ omp: {} }, homeDir, [{
+      source: 'team', key: 'no-force-push', event: 'PreToolUse', matcher: 'Bash', timeout: 10,
+      command: 'grep -q -- --force && { echo "Use --force-with-lease" >&2; exit 2; } || true',
+      description: '[teamai:hook:no-force-push] Refuse a force push',
+    }], getUserManagedHooksPath(), { scope: 'project', installedBaseDir: projectRoot });
+    await actualHooks.applyBridgedAgentHook('omp', { slug: 'no-rm', event: 'PreToolUse', matcher: 'Bash', command: 'grep -q "rm -rf" && { echo "No rm -rf" >&2; exit 2; } || true' });
+    const bash = (command: string) => runBridgedTeamHooks('omp', 'PreToolUse', JSON.stringify({ cwd: projectRoot, tool_name: 'bash', tool_input: { command } }));
+    expect(JSON.parse((await bash('git push --force')).stdout)).toEqual({ block: 'Use --force-with-lease' });
+    const localConfig = makeLocalConfig(homeDir, repoPath, { scope: 'project', projectRoot, enabledAgents: ['omp'] });
+    const teamConfig = TeamaiConfigSchema.parse({ team: 't', repo: 'https://example.invalid/t.git' });
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
+
+    await uninstall({ force: true, agent: 'omp' });
+
+    expect((await bash('git push --force')).stdout).toBe('');
+    expect(JSON.parse((await bash('rm -rf build')).stdout)).toEqual({ block: 'No rm -rf' });
+  });
+
   it("removes the flat OMP copy of a namespaced team rule on uninstall, not a member's file of that name (#946)", async () => {
     const { homeDir, repoPath } = await setupFixture(tmpDir);
     vi.stubEnv('HOME', homeDir);
