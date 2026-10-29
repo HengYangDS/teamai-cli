@@ -173,7 +173,7 @@ program
   .option('--http <url>', 'Git-free HTTP team repo (read-only consumer; only needs an API key)')
   .option('--provider <name>', 'Git provider for the team repo on this machine: tgit, github, cnb, gitlab, gitcode, or git. Skips auto-detection. `git` uses your existing Git auth and needs no platform token, but opens no PR/MR.')
   .option('--self', 'Single-repo mode: the current git repo is the team repo (equivalent to `teamai init .`). Knowledge lives on main under .teamai/; reports go to the teamai-reports orphan branch.')
-  .option('--token <key>', 'API key for HTTP team repo / status reporting (stored 0600, never committed). Also reads TEAMAI_API_TOKEN.')
+  .option('--token <key>', 'API key for HTTP team repo / status reporting (stored 0600, never committed). Also reads TEAMAI_API_TOKEN. With --http and a single --agent, an agent access token (sk-) is kept for that agent only, next to the other agents\' tokens (--force keeps them too); while that agent\'s current token still works it is kept and the new one is not used. Without --agent on a machine where one agent already holds a token, that agent takes it, or — keeping its working one — the new token serves the tools without a token of their own.')
   .option('--scope <scope>', 'Install scope: workspace (default, <cwd>/.teamai + <cwd>/.claude) or user (~/.teamai + ~/.claude); project is the older name for workspace')
   .option('--inherit-user-scope', 'In workspace scope, also sync safe user-scope resources, load its env variables (not its secrets) in the workspace, and search its knowledge')
   .option('--no-inherit-user-scope', 'Disable user-scope inheritance for this workspace')
@@ -643,6 +643,7 @@ sourceCmd
   .command('add-http <endpoint>')
   .description('Add an HTTP source (report/sync/ack) alongside a git main repo')
   .option('--token <key>', 'API token for the HTTP endpoint (stored 0600, never committed)')
+  .option('--agent <name>', 'The AI tool this token is for (e.g. codebuddy, claude); hooks are injected into that tool only. An agent access token (sk-) works for one agent only, so each agent keeps its own; while that agent\'s current token still works it is kept and the new one is not used.')
   .option('--force', 'Overwrite an existing HTTP source config')
   .action(async (endpoint: string, cmdOpts) => {
     const globalOpts = program.opts() as GlobalOptions;
@@ -1307,9 +1308,9 @@ program
 
 program
   .command('bind-project')
-  .description('Bind the current workspace to a ClawPro project for HTTP local-agent sync')
+  .description('Enroll the current workspace in HTTP local-agent sync and bind it to a ClawPro project. A workspace where this never ran is left alone')
   .option('--project-id <id>', 'Project ID from /projects/mine')
-  .option('--skip', 'Mark current workspace as skipped (never prompt again)')
+  .option('--skip', 'Enroll the current workspace without a project (never prompt again)')
   .action(async (cmdOpts) => {
     const { bindCurrentProject } = await import('./local-agent.js');
     await bindCurrentProject({

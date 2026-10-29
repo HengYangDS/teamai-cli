@@ -770,7 +770,9 @@ export async function initHttp(
   // now, before anything is written (resolving the scope may migrate a config),
   // and only here: by Step 6 the local agent may read back the config this init saved.
   const { assertNoLocalAgentReplacement, initLocalAgentHttp } = await import('./local-agent.js');
-  if (!options.force) await assertNoLocalAgentReplacement({ endpoint: url, token: options.token });
+  if (!options.force) {
+    await assertNoLocalAgentReplacement({ endpoint: url, token: options.token, filterAgents: requestedAgents });
+  }
 
   // Step 0: scope (same rules as git init — default project)
   let scope: Scope;
@@ -936,12 +938,25 @@ export async function initHttp(
 
   // Step 6: also initialize local-agent config so the new hook-dispatch --stdin
   // path can deliver rules/claudemd (not just skills).
-  await initLocalAgentHttp({ endpoint: url, token: options.token, filterAgents });
+  let localAgentFailed = false;
+  try {
+    await initLocalAgentHttp({ endpoint: url, token: options.token, force: options.force, filterAgents });
+  } catch (e) {
+    // Not debug: a refusal here (an access token with no single --agent) leaves
+    // the credentials this machine already has, so this init did not finish.
+    localAgentFailed = true;
+    process.exitCode = 1;
+    log.error(`Local agent init: ${(e as Error).message}`);
+  }
 
   await runInitScript(localConfig, 'postInit', options.dryRun, true);
 
-  log.success('teamai initialized (HTTP read-only)!');
-  log.info('Skills/rules will auto-sync on each session start via report/sync. This team is read-only (no push).');
+  if (localAgentFailed) {
+    log.warn('teamai initialized (HTTP read-only) without the local agent: report/sync keeps the credentials this machine already had.');
+  } else {
+    log.success('teamai initialized (HTTP read-only)!');
+    log.info('Skills/rules will auto-sync on each session start in an enrolled workspace via report/sync. This team is read-only (no push).');
+  }
   closePrompt();
 }
 

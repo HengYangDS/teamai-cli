@@ -178,9 +178,25 @@ interface WorkspaceBinding {
   ideType?: string;
 }
 
+/**
+ * projectName of a workspace that is enrolled (`teamai bind-project` ran in it)
+ * but has no ClawPro project yet. Like `__skipped__` it reports project_id 0;
+ * only this state prompts for a project. A workspace with no binding entry at
+ * all is not enrolled: the local agent does not sync there, and only says so
+ * once (see unenrolledNotice).
+ */
+const PENDING_BINDING_NAME = '__pending__';
+
 export interface LocalAgentConfig {
   endpoint: string;
+  /** Token for an agent with no entry in `agentTokens` (one set before per-agent tokens). */
   token?: string;
+  /**
+   * The backend binds an agent access token (`sk-`) to the first agent instance
+   * that reports with it, and an instance is one agent type on one machine. So
+   * each agent needs its own token: keyed by normalized agent type.
+   */
+  agentTokens?: Record<string, string>;
   /**
    * @deprecated No longer the id source. local_agent_id is now derived at
    * runtime per detected tool via resolveLocalAgentId(). Kept optional so
@@ -1097,12 +1113,22 @@ async function workspaceCacheGitignore(workspacePath: string, repoPath: string):
   return await readFileSafe(file) === WORKSPACE_CACHE_GITIGNORE ? file : null;
 }
 
-function authHeaders(config: LocalAgentConfig, json = true): Record<string, string> {
+/**
+ * The token a request on behalf of `tool` sends: that agent's own token, else
+ * the shared one. A request with no agent (`teamai bind-project` listing the
+ * user's projects) takes any configured token: each one names the same user.
+ */
+export function tokenForAgent(config: Pick<LocalAgentConfig, 'token' | 'agentTokens'>, tool?: string): string | undefined {
+  if (tool) return config.agentTokens?.[normalizeAgentType(tool)] ?? config.token;
+  return config.token ?? Object.values(config.agentTokens ?? {})[0];
+}
+
+function authHeaders(token: string | undefined, json = true): Record<string, string> {
   const headers: Record<string, string> = {};
   if (json) headers['Content-Type'] = 'application/json';
-  if (config.token) {
-    headers.Authorization = `Bearer ${config.token}`;
-    headers['X-API-Token'] = config.token;
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+    headers['X-API-Token'] = token;
   }
   return headers;
 }
@@ -1112,12 +1138,12 @@ async function localAgentFetch<T>(
   tag: string,
   route: RouteName,
   init?: RequestInit,
-  opts?: { redactResponseLog?: boolean },
+  opts?: { redactResponseLog?: boolean; tool?: string },
 ): Promise<T> {
   const method = init?.method ?? 'GET';
   const url = `${config.endpoint}${resolveRoute(config, route)}`;
   const headers: Record<string, string> = {
-    ...authHeaders(config, init?.body !== undefined),
+    ...authHeaders(tokenForAgent(config, opts?.tool), init?.body !== undefined),
     ...(init?.headers as Record<string, string> | undefined),
   };
   logHttpRequest(tag, method, url, headers, init?.body);
@@ -1159,12 +1185,13 @@ async function appendErrorLog(entry: unknown): Promise<void> {
   }
 }
 
-export async function fetchUserProjects(config: LocalAgentConfig): Promise<LocalAgentProject[]> {
+export async function fetchUserProjects(config: LocalAgentConfig, tool?: string): Promise<LocalAgentProject[]> {
   const response = await localAgentFetch<{ ok?: boolean; projects?: LocalAgentProject[] }>(
     config,
     localAgentTag({}),
     'projects',
     { method: 'GET' },
+    { tool },
   );
   return response.projects ?? [];
 }
@@ -1225,8 +1252,8 @@ export async function execPluginCommand(cmd: string, timeoutMs: number): Promise
  * Route = 'getConfig' (default path /api/local-agent/get-config, overridable via config.routes).
  * localAgentFetch builds `url = config.endpoint + resolveRoute(...)`, matching report/sync pattern.
  */
-async function fetchPluginConfig(config: LocalAgentConfig, tag: string): Promise<unknown> {
-  return localAgentFetch<unknown>(config, tag, 'getConfig', { method: 'GET' }, { redactResponseLog: true });
+async function fetchPluginConfig(config: LocalAgentConfig, tag: string, tool?: string): Promise<unknown> {
+  return localAgentFetch<unknown>(config, tag, 'getConfig', { method: 'GET' }, { redactResponseLog: true, tool });
 }
 
 const PLUGIN_PULL_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -1266,7 +1293,7 @@ async function maybeReconcilePlugins(context: LocalAgentContext): Promise<void> 
     const { spawn } = await import('node:child_process');
     if (!process.argv[1]) { log.debug('[local-agent] plugin reconcile: no CLI entrypoint (argv[1]), skipping'); return; }
     const child = spawn(process.execPath, [process.argv[1], 'source', 'reconcile-plugins'],
-      { detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, TEAMAI_PLUGIN_LOCAL_AGENT_ID: localAgentId } });
+      { detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, TEAMAI_PLUGIN_LOCAL_AGENT_ID: localAgentId, TEAMAI_PLUGIN_TOOL: tool } });
     child.unref();
   } catch (e) { log.debug(`[local-agent] plugin reconcile spawn skipped: ${(e as Error).message}`); }
 }
@@ -1282,7 +1309,7 @@ export async function runPluginReconcileWorker(): Promise<void> {
     const tag = '[local-agent] [plugin-reconcile]';
     const statePath = getPluginPullStatePath();
     try {
-      const resp = await fetchPluginConfig(config, tag);
+      const resp = await fetchPluginConfig(config, tag, process.env.TEAMAI_PLUGIN_TOOL);
       const { vars, plugins } = parseGetConfig(resp);
       const declaredSlugs = plugins.length ? ` [${plugins.map((p) => p.slug).join(', ')}]` : '';
       log.debug(`${tag} get-config: ${plugins.length} plugin(s) declared${declaredSlugs}`);
@@ -1344,6 +1371,18 @@ async function promptForProjectBinding(
   projects: LocalAgentProject[],
 ): Promise<LocalAgentProject | null> {
   if (projects.length === 0) return null;
+
+  // Non-interactive run (`teamai bind-project` from a setup script or an IDE
+  // hook): no answer is possible, so list the projects before giving up —
+  // hiding them made the caller believe the account had none.
+  if (!isInteractive()) {
+    log.info('可用项目:');
+    projects.forEach((project, index) => {
+      const desc = project.description ? ` - ${project.description}` : '';
+      log.info(`  ${index + 1}. ${project.name}${desc} [id=${project.id}]`);
+    });
+    return null;
+  }
 
   log.debug(`local-agent: workspace not bound: ${workspacePath}`);
   const answer = await askViaTty('是否绑定到一个项目？[y/N] ');
@@ -1429,6 +1468,32 @@ async function inheritWorktreeBinding(
   return true;
 }
 
+/**
+ * Whether an earlier release delivered to `workspacePath` before enrollment
+ * was per workspace: skills, rules or claudemd in the manifest, or models in
+ * the model manifest. Such a workspace counts as enrolled, so an upgrade
+ * keeps what it holds in sync.
+ */
+async function deliveredToWorkspace(workspacePath: string): Promise<boolean> {
+  if ((await loadManifest()).scopes[scopeKey('project', workspacePath)]) return true;
+  const models = await readJson<ModelConfigManifest>(getModelManifestPath());
+  return Boolean(models?.workspaceModels?.[workspacePath]);
+}
+
+/**
+ * Whether the local agent serves `workspacePath`: it has a binding entry, a
+ * worktree inherits its main checkout's, or it was delivered to before
+ * enrollment was per workspace (recorded now as pending a project).
+ */
+async function enrollWorkspace(config: LocalAgentConfig, cwd: string | undefined, workspacePath: string): Promise<boolean> {
+  if (config.workspaceBindings[workspacePath]) return true;
+  if (await inheritWorktreeBinding(config, cwd, workspacePath)) return true;
+  if (!await deliveredToWorkspace(workspacePath)) return false;
+  await persistWorkspaceBinding(config, cwd, workspacePath, 0, PENDING_BINDING_NAME);
+  log.debug(`[local-agent] enrolled a workspace an earlier release delivered to: ${workspacePath}`);
+  return true;
+}
+
 export async function bindWorkspaceToProject(
   workspacePath: string,
   projectId?: number,
@@ -1456,24 +1521,57 @@ export async function bindWorkspaceToProject(
   return binding;
 }
 
+/**
+ * Binding-hint markers dedupe the prompt per session. Two defects made a
+ * pending workspace stop asking to be bound:
+ *
+ * 1. A marker keyed by a derived fallback id (`pid-<ppid>-<cwd>` for hosts
+ *    that omit session_id) embeds path separators, so the marker path pointed
+ *    into a nonexistent tmpdir subdirectory — the write failed silently and
+ *    dedup never engaged; and a host whose id is stable across chats (an IDE
+ *    process-level id) made even a working marker outlive the chat that wrote
+ *    it, silencing every later session.
+ *
+ * So marker keys are flattened into a safe filename, and markers carry a
+ * timestamp and expire: a workspace still pending a project is prompted again
+ * in each new chat (at the latest after the TTL) until it is bound or skipped.
+ */
+const BINDING_MARKER_TTL_MS = 10 * 60 * 1000;
+
+/** Marker file for a hint key; a derived `pid-<ppid>-<cwd>` id contains path separators, so flatten it. */
+function hintMarkerPath(prefix: string, key: string): string {
+  const flat = key.replace(/[^A-Za-z0-9._-]/g, '_');
+  return path.join(os.tmpdir(), `${prefix}-${flat}`);
+}
+
+/** Whether the marker still suppresses the hint (written within the TTL). */
+function bindingHintMarkerFresh(marker: string): boolean {
+  try {
+    const stamp = Number(fs.readFileSync(marker, 'utf8'));
+    return Number.isFinite(stamp) && Date.now() - stamp < BINDING_MARKER_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureWorkspaceBinding(
   config: LocalAgentConfig,
   workspacePath: string,
   sessionId?: string,
   cwd?: string,
+  tool?: string,
 ): Promise<void> {
-  if (config.workspaceBindings[workspacePath]) return;
-  // A worktree inherits its main checkout's binding/skip decision — never prompt.
-  if (await inheritWorktreeBinding(config, cwd, workspacePath)) return;
+  // Only an enrolled workspace still pending a project is prompted; a bound or
+  // skipped one is not, and an unenrolled one never reaches here.
+  if (config.workspaceBindings[workspacePath]?.projectName !== PENDING_BINDING_NAME) return;
 
-  const markerKey = sessionId || `ppid-${process.ppid}`;
-  const hintMarker = path.join(os.tmpdir(), `teamai-bind-session-${markerKey}`);
-  if (fs.existsSync(hintMarker)) return;
-  try { fs.writeFileSync(hintMarker, ''); } catch {}
+  // Only hint once per session — use a temp marker file keyed by sessionId
+  const hintMarker = hintMarkerPath('teamai-bind-session', sessionId || `ppid-${process.ppid}`);
+  if (bindingHintMarkerFresh(hintMarker)) return;
 
   let projects: LocalAgentProject[];
   try {
-    projects = await fetchUserProjects(config);
+    projects = await fetchUserProjects(config, tool);
   } catch (e) {
     log.debug(`local-agent: failed to load user projects: ${(e as Error).message}`);
     return;
@@ -1501,14 +1599,17 @@ async function ensureWorkspaceBinding(
       additionalContext: context,
     },
   });
+  // Consume the hint only once it was actually emitted — a failed project
+  // fetch or an empty account must not eat this session's prompt.
+  try { fs.writeFileSync(hintMarker, String(Date.now())); } catch {}
   process.stdout.write(hookOutput + '\n');
 }
 
 /**
- * The organization-binding prompt (TTY prompt + injected hook context) is
- * on by default. Disable it explicitly with `TEAMAI_BIND_PROMPT_ENABLED=0`
- * (or `false`). The manual `teamai bind-project` command is always available
- * regardless.
+ * The organization-binding prompt (TTY prompt + injected hook context) and the
+ * unenrolled-workspace notice are on by default. Disable both explicitly with
+ * `TEAMAI_BIND_PROMPT_ENABLED=0` (or `false`). The manual `teamai bind-project`
+ * command is always available regardless.
  */
 function isBindPromptEnabled(): boolean {
   const flag = process.env.TEAMAI_BIND_PROMPT_ENABLED;
@@ -1534,21 +1635,17 @@ async function emitBindingHint(
   config: LocalAgentConfig,
   workspacePath: string,
   sessionId?: string,
-  cwd?: string,
+  tool?: string,
 ): Promise<void> {
-  if (config.workspaceBindings[workspacePath]) return;
-  // A worktree inherits its main checkout's binding/skip decision — never hint.
-  if (await inheritWorktreeBinding(config, cwd, workspacePath)) return;
+  if (config.workspaceBindings[workspacePath]?.projectName !== PENDING_BINDING_NAME) return;
 
   // Only hint once per session — use a temp marker file keyed by sessionId
-  const markerKey = sessionId || `ppid-${process.ppid}`;
-  const hintMarker = path.join(os.tmpdir(), `teamai-bind-hint-${markerKey}`);
-  if (fs.existsSync(hintMarker)) return;
-  try { fs.writeFileSync(hintMarker, ''); } catch {}
+  const hintMarker = hintMarkerPath('teamai-bind-hint', sessionId || `ppid-${process.ppid}`);
+  if (bindingHintMarkerFresh(hintMarker)) return;
 
   let projects: LocalAgentProject[];
   try {
-    projects = await fetchUserProjects(config);
+    projects = await fetchUserProjects(config, tool);
   } catch {
     return;
   }
@@ -1577,6 +1674,34 @@ async function emitBindingHint(
       additionalContext: context,
     },
   });
+  // Consume the hint only once it was actually emitted — a failed project
+  // fetch or an empty account must not eat this session's hint.
+  try { fs.writeFileSync(hintMarker, String(Date.now())); } catch {}
+  process.stdout.write(hookOutput + '\n');
+}
+
+/**
+ * A silent skip is indistinguishable from a broken install, so the gate names
+ * the way out of an unenrolled workspace — once per session, for every host
+ * (the project prompt above is buddy-only; this one is not). Gated by
+ * TEAMAI_BIND_PROMPT_ENABLED like that prompt.
+ */
+function unenrolledNotice(context: LocalAgentContext, workspacePath: string): void {
+  // Only notice once per session — use a temp marker file keyed by sessionId
+  const marker = hintMarkerPath('teamai-unenrolled', context.event?.sessionId || `ppid-${process.ppid}`);
+  if (bindingHintMarkerFresh(marker)) return;
+
+  const text = [
+    `[teamai] This workspace is not enrolled, so teamai reports and syncs nothing here: ${workspacePath}`,
+    'Run `teamai bind-project` once in it to enroll — bind a ClawPro project, or `--skip` to enroll without one.',
+  ].join('\n');
+  const hookOutput = JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: context.event?.type === 'prompt_submit' ? 'UserPromptSubmit' : 'SessionStart',
+      additionalContext: text,
+    },
+  });
+  try { fs.writeFileSync(marker, String(Date.now())); } catch {}
   process.stdout.write(hookOutput + '\n');
 }
 
@@ -1854,8 +1979,8 @@ async function scanModelsFromDisk(tool: string, workspacePath?: string): Promise
  * Workspace bindings are only ever added, never removed, so a deleted
  * project directory would otherwise be reported forever and the server
  * (full-sync snapshot) could never drop it. This prunes such stale
- * entries in place. Applies to skipped ('__skipped__', projectId 0)
- * entries too — a deleted directory should not leave a permanent sentinel.
+ * entries in place. Applies to skipped ('__skipped__') and pending
+ * ('__pending__') entries (projectId 0) too — a deleted directory should not leave a permanent sentinel.
  * A binding on HOME, which earlier releases could record, is pruned as well:
  * HOME is never a workspace (see resolveWorkspacePath).
  *
@@ -2818,11 +2943,19 @@ async function cachedClaudemdBlock(repoPath: string): Promise<{ files: string[];
 /**
  * The HTTP agent's claudemd instructions for the project at `cwd`, as text a
  * session hook adds (#945): Pi, OMP and Hermes have no project file of their
- * own. Empty outside a project the agent delivered to.
+ * own. Empty outside a project the agent delivered to, and in a workspace
+ * the agent does not serve (see enrollWorkspace; read only, as the hook
+ * runs outside the sync lock).
  */
 export async function localAgentInstructionText(cwd: string, tool = ''): Promise<string> {
   const workspacePath = await resolveWorkspacePath(cwd);
   if (!workspacePath) return '';
+  const config = await loadLocalAgentConfig({ dryRun: true });
+  if (!config) return '';
+  if (!config.workspaceBindings[workspacePath]) {
+    const anchors = await resolveAnchors(cwd);
+    if (!(anchors && config.workspaceBindings[anchors.projectAnchor]) && !await deliveredToWorkspace(workspacePath)) return '';
+  }
   const native = await nativeProjectInstructions(tool, workspacePath);
   if (native.includes(TEAMAI_CLAUDEMD_START) || native.includes(TEAMAI_CLAUDEMD_END)) return '';
   const { block } = await cachedClaudemdBlock(await getResourceRepoPath('project', workspacePath));
@@ -3014,6 +3147,7 @@ async function ackCommand(
   status: 'success' | 'failed',
   version?: string,
   error?: string,
+  tool?: string,
 ): Promise<void> {
   await localAgentFetch(config, tag, 'ack', {
     method: 'POST',
@@ -3024,7 +3158,7 @@ async function ackCommand(
       error: error ?? '',
       version,
     }),
-  });
+  }, { tool });
 }
 
 function requireModelString(
@@ -4362,7 +4496,7 @@ async function processCommands(
     }
     try {
       const version = await executeCommand(config, command, context);
-      await ackCommand(config, tag, command, 'success', version);
+      await ackCommand(config, tag, command, 'success', version, undefined, context.tool ?? 'workbuddy');
       if (command.type === 'apply_model_config') modelConfigApplied = true;
       log.debug(`${tag} command ${command.id} (${command.type ?? ''}) succeeded`);
       // Uninstall succeeded — skip remaining commands; the hook process exits naturally.
@@ -4374,7 +4508,7 @@ async function processCommands(
       const error = (e as Error).message;
       log.error(`${tag} command ${command.id} failed: ${error}`);
       try {
-        await ackCommand(config, tag, command, 'failed', undefined, error);
+        await ackCommand(config, tag, command, 'failed', undefined, error, context.tool ?? 'workbuddy');
       } catch (ackError) {
         log.debug(`${tag} failed to ack command ${command.id}: ${(ackError as Error).message}`);
       }
@@ -4406,22 +4540,29 @@ async function syncLocalAgent(context: LocalAgentContext): Promise<boolean> {
   const config = await loadLocalAgentConfig();
   if (!config) return false;
 
+  // Enrollment is per workspace: a workspace where `teamai bind-project` never
+  // ran has no binding entry, and the local agent stays silent there — no
+  // report, sync or write; only unenrolledNotice says why. A worktree inherits
+  // its main checkout's entry, and a workspace an earlier release delivered to
+  // is enrolled. A session outside any workspace (HOME, a task dir) runs user
+  // scope.
+  const currentPath = await resolveWorkspacePath(context.cwd);
+  if (currentPath && !await enrollWorkspace(config, context.cwd, currentPath)) {
+    log.debug(`[local-agent] workspace not enrolled, skipping: ${currentPath}`);
+    if (isBindPromptEnabled()) unenrolledNotice(context, currentPath);
+    return false;
+  }
+
   // Binding prompt is injected via stdout hook context (not HTTP), so it must run
   // even inside the CloudStudio sandbox — the sandbox guard below only skips the
-  // HTTP report/sync that would produce a duplicate card. Resolve the workspace
-  // only when the prompt is enabled AND the host is a buddy agent, so every other
-  // path (disabled flag, or a non-buddy tool like Claude/Cursor/Codex) forks no
-  // git process.
-  if (isBindPromptEnabled() && isBindPromptTool(context.tool)) {
-    const workspacePath = await resolveWorkspacePath(context.cwd);
-    if (workspacePath) {
-      const sid = context.event?.sessionId;
-      if (context.event?.type === 'session_start') {
-        await ensureWorkspaceBinding(config, workspacePath, sid, context.cwd);
-      }
-      if (context.event?.type === 'prompt_submit') {
-        await emitBindingHint(config, workspacePath, sid, context.cwd);
-      }
+  // HTTP report/sync that would produce a duplicate card.
+  if (currentPath && isBindPromptEnabled() && isBindPromptTool(context.tool)) {
+    const sid = context.event?.sessionId;
+    if (context.event?.type === 'session_start') {
+      await ensureWorkspaceBinding(config, currentPath, sid, context.cwd, context.tool);
+    }
+    if (context.event?.type === 'prompt_submit') {
+      await emitBindingHint(config, currentPath, sid, context.tool);
     }
   }
 
@@ -4453,10 +4594,6 @@ async function syncLocalAgent(context: LocalAgentContext): Promise<boolean> {
     }
 
     const pruned = await pruneDeadWorkspaceBindings(config);
-    // Resolve the current workspace independently here rather than reusing an
-    // earlier local, so tool attribution does not depend on the binding-prompt
-    // block above keeping a `workspacePath` in scope.
-    const currentPath = await resolveWorkspacePath(context.cwd);
     const stamped = stampWorkspaceTool(config, currentPath, context.tool ?? 'workbuddy');
     if (pruned || stamped) {
       await saveLocalAgentConfig(config);
@@ -4464,13 +4601,14 @@ async function syncLocalAgent(context: LocalAgentContext): Promise<boolean> {
   }
 
   let changedProjectCopies = false;
+  const tool = context.tool ?? 'workbuddy';
   try {
     if (!skipReport) {
       const reportPayload = await buildReportPayload(config, context);
       await localAgentFetch(config, tag, 'report', {
         method: 'POST',
         body: JSON.stringify(reportPayload),
-      });
+      }, { tool });
       log.debug(`${tag} report OK`);
     }
 
@@ -4484,7 +4622,7 @@ async function syncLocalAgent(context: LocalAgentContext): Promise<boolean> {
       tag,
       'sync',
       { method: 'POST', body: JSON.stringify(syncPayload) },
-      { redactResponseLog: true },
+      { redactResponseLog: true, tool },
     );
     // Prefer the unified cmds[] (source of truth). Fall back to the legacy
     // commands[] for older backends that do not yet emit cmds. An empty cmds[]
@@ -4504,7 +4642,7 @@ async function syncLocalAgent(context: LocalAgentContext): Promise<boolean> {
         await localAgentFetch(config, tag, 'report', {
           method: 'POST',
           body: JSON.stringify(reportPayload),
-        });
+        }, { tool });
         log.debug(`${tag} model config report OK`);
       }
     }
@@ -4713,11 +4851,59 @@ export async function writeTokenFile(tokenPath: string, token: string): Promise<
 }
 
 /**
+ * Whether `token` still authenticates against `endpoint`. A network error or a
+ * 5xx answers `undefined` (unknown); only a 401/403 means the token is dead.
+ */
+async function tokenStillWorks(config: LocalAgentConfig, token: string): Promise<boolean | undefined> {
+  try {
+    const response = await fetch(`${config.endpoint}${resolveRoute(config, 'projects')}`, {
+      headers: authHeaders(token, false),
+      signal: AbortSignal.timeout(LOCAL_AGENT_FETCH_TIMEOUT_MS),
+    });
+    if (response.ok) return true;
+    if (response.status === 401 || response.status === 403) return false;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Only an agent access token (`sk-`) is bound to one agent; `hk-` is a user token every agent reports with. */
+function isAgentToken(token: string | undefined): boolean {
+  return token?.trim().startsWith('sk-') === true;
+}
+
+/**
+ * The agent an incoming token belongs to, or undefined for a user token (`hk-`),
+ * which every agent reports with. `--agent <tool>` names it; without it, a token
+ * that no agent owns yet belongs to the only agent here, if there is exactly one.
+ */
+function incomingTokenOwner(
+  existing: LocalAgentConfig | null,
+  endpoint: string,
+  token: string | undefined,
+  filterAgents?: string[],
+): string | undefined {
+  if (!isAgentToken(token)) return undefined;
+  const named = filterAgents ?? [];
+  if (named.length === 1) return normalizeAgentType(named[0]);
+  // Several --agent name no single owner; the refusal below asks for one.
+  if (named.length > 1) return undefined;
+  const sameEndpoint = existing !== null && normalizeEndpoint(existing.endpoint) === endpoint;
+  const held = sameEndpoint ? Object.keys(existing?.agentTokens ?? {}) : [];
+  return held.length === 1 ? held[0] : undefined;
+}
+
+/**
  * Throw, without writing, when pointing the HTTP local agent at `endpoint` and
  * `token` would replace another one, so `init --http` refuses before it changes
  * anything. The same endpoint and token again is a re-run.
  */
-export async function assertNoLocalAgentReplacement(options: { endpoint: string; token?: string }): Promise<void> {
+export async function assertNoLocalAgentReplacement(options: {
+  endpoint: string;
+  token?: string;
+  filterAgents?: string[];
+}): Promise<void> {
   // An environment endpoint is not replaced: the config init writes takes precedence over it.
   const existing = await loadLocalAgentConfig({ dryRun: true, envFallback: false });
   if (!existing) return;
@@ -4727,6 +4913,9 @@ export async function assertNoLocalAgentReplacement(options: { endpoint: string;
       `The HTTP local agent already uses ${existing.endpoint}. Re-run with --force to replace it with ${endpoint}.`,
     );
   }
+  // An agent's own token joins the credentials this endpoint already holds
+  // instead of replacing them, so adding one needs no --force.
+  if (incomingTokenOwner(existing, endpoint, options.token, options.filterAgents)) return;
   if (options.token !== undefined && existing.token !== options.token) {
     throw new Error(
       `The HTTP local agent already uses ${endpoint} with another token. Re-run with --force to replace the token.`,
@@ -4735,12 +4924,49 @@ export async function assertNoLocalAgentReplacement(options: { endpoint: string;
 }
 
 /**
- * Point the HTTP local agent at `endpoint`, replacing any it had; a caller that
- * must not replace one checks `assertNoLocalAgentReplacement` first.
+ * Which token `init` should keep for an agent. The backend lets an unused agent
+ * token take over an agent that already has one, and the old token stops
+ * working at once — including inside the model configs it already delivered.
+ * So re-running the onboarding prompt in a second workspace keeps the agent's
+ * current token while it still works, and the freshly issued one goes unused.
+ */
+async function chooseAgentToken(
+  existing: LocalAgentConfig,
+  agent: string,
+  current: string | undefined,
+  incoming: string,
+  spare: boolean,
+): Promise<string> {
+  if (!current || current === incoming) return incoming;
+  if (await tokenStillWorks(existing, current) === false) {
+    log.info(`The ${agent} access token on this machine no longer works; using the new one.`);
+    return incoming;
+  }
+  log.info(`Keeping the ${agent} access token already on this machine; the new one is ${
+    spare ? 'kept for the agents without a token of their own.' : 'not used.'}`);
+  return current;
+}
+
+/**
+ * The agent a shared agent token from before per-agent tokens belongs to: the
+ * one tool every workspace that has reported is stamped with, else unknown.
+ */
+function legacyTokenAgent(config: LocalAgentConfig): string | undefined {
+  if (!config.token) return undefined;
+  const agents = new Set(Object.values(config.workspaceBindings)
+    .map((binding) => binding.ideType).filter((t): t is string => Boolean(t)).map(normalizeAgentType));
+  return agents.size === 1 ? [...agents][0] : undefined;
+}
+
+/**
+ * Point the HTTP local agent at `endpoint`. A caller that must not replace
+ * another one checks `assertNoLocalAgentReplacement` first; `force` overwrites
+ * what this endpoint already holds.
  */
 export async function initLocalAgentHttp(options: {
   endpoint: string;
   token?: string;
+  force?: boolean;
   filterAgents?: string[];
 }): Promise<void> {
   const endpoint = normalizeEndpoint(options.endpoint);
@@ -4748,12 +4974,91 @@ export async function initLocalAgentHttp(options: {
     throw new Error('HTTP endpoint is required.');
   }
 
+  // `init --http` writes the user config.yaml and saves the API key before this
+  // runs, and a missing config.json is backfilled from them (loadLocalAgentConfig).
+  // That backfill is this command's own footprint, not an install to refuse, so
+  // only a config.json that existed before this call counts as "already initialized".
+  const configExisted = await pathExists(getConfigPath());
   const existing = await loadLocalAgentConfig();
+  const token = options.token?.trim() || undefined;
+  const sameEndpoint = existing !== null && normalizeEndpoint(existing.endpoint) === endpoint;
+  const namedCount = options.filterAgents?.length ?? 0;
+  // The agents that already hold a credential of this endpoint.
+  const held = sameEndpoint ? Object.keys(existing?.agentTokens ?? {}) : [];
+  // Only an agent access token (`sk-`) is bound to one agent; a user token
+  // (`hk-`) works for every agent, so it stays in the shared slot.
+  const agentScoped = isAgentToken(token);
+  // One agent's access token: it goes to that agent alone, next to the others'.
+  // Passed without --agent it still belongs to one agent — the only one here.
+  // That ownership is a guess, so a token the agent does not take over is never
+  // dropped: it lands in the shared slot below, for the agents with no entry.
+  // Several --agent name no single owner, so the refusal below asks for one.
+  const inferred = namedCount === 0 && agentScoped && held.length === 1;
+  const agent = agentScoped ? incomingTokenOwner(existing, endpoint, token, options.filterAgents) : undefined;
+  const perAgent = Boolean(agent && token);
+  // A run that keeps the endpoint and its token, or that only gives one agent a
+  // credential of its own, replaces nothing: running it again in another
+  // workspace re-installs the hooks without disturbing what this machine holds.
+  // A replacement is refused earlier by assertNoLocalAgentReplacement.
+  const replaces = !sameEndpoint || (token !== undefined && token !== existing?.token);
+  if (existing && configExisted && !options.force && replaces && !(perAgent && sameEndpoint)) {
+    throw new Error('HTTP local agent is already initialized. Re-run with --force to overwrite.');
+  }
+  // tokenForAgent prefers an agent's own token, so a token no agent owns would
+  // sit in the shared slot while every agent keeps the credential it already has.
+  if (agentScoped && !agent && (namedCount > 1 || held.length > 1)) {
+    throw new Error(
+      `An access token works for one agent only. Re-run with --agent <tool> naming the agent it is for` +
+      `${held.length > 1 ? `; this machine already holds credentials for ${held.join(', ')}` : ''}.`,
+    );
+  }
 
+  // Another endpoint is another backend: none of the old tokens belong to it.
+  const agentTokens = { ...(sameEndpoint ? existing?.agentTokens : undefined) };
+  // Switching the agents named with --agent to a token that works for every agent:
+  // the entry each has of its own is what it would keep reporting with, so drop
+  // them and let them fall back to the shared one. Otherwise a revoked or rotated
+  // entry outlives the switch, and those agents keep sending a dead credential.
+  if (token && !agentScoped) {
+    for (const named of options.filterAgents ?? []) delete agentTokens[normalizeAgentType(named)];
+  }
+  let sharedToken = perAgent ? (sameEndpoint ? existing?.token : undefined)
+    : token ?? (sameEndpoint ? existing?.token : undefined);
+  // `init --http` saves the key before this runs, and a missing config.json is
+  // backfilled from it: that copy is this agent's token, not a shared one.
+  if (perAgent && sharedToken === token) sharedToken = undefined;
+  if (perAgent) {
+    let current: string | undefined = agentTokens[agent!];
+    // The shared token this agent took before per-agent tokens: it is copied
+    // to the agent, not moved — an agent with no entry of its own (Claude,
+    // Codex, Cursor on a machine where only a buddy tool ever bound a
+    // workspace) has no other credential to fall back on.
+    if (!current && sameEndpoint && legacyTokenAgent(existing!) === agent) {
+      current = existing!.token;
+    }
+    // Ownership was inferred (no --agent): the incoming token may well have been
+    // issued for another tool, so when this agent keeps the credential that still
+    // works the new one is not dropped — the agents with no token of their own
+    // report with it. An agent that already owns the shared slot is not replaced.
+    const spare = inferred && !sharedToken;
+    const chosen = sameEndpoint ? await chooseAgentToken(existing!, agent!, current, token!, spare) : token!;
+    agentTokens[agent!] = chosen;
+    if (spare && chosen !== token) sharedToken = token;
+  }
+  // The shared token is what the agents with no entry of their own report with.
+  // One the backend rejects keeps them at 401 while this run reports success, so
+  // it goes, and the warning names the way to renew them one agent at a time.
+  if (perAgent && sharedToken && sameEndpoint && sharedToken !== token
+    && await tokenStillWorks(existing!, sharedToken) === false) {
+    log.warn('The shared access token on this machine no longer works, so the agents without a token of their own have none now. '
+      + 'Re-run with `--agent <tool>` for each of them to install a new one.');
+    sharedToken = undefined;
+  }
   const config: LocalAgentConfig = {
     endpoint,
-    // Never carry a token to another endpoint.
-    token: options.token ?? (existing?.endpoint === endpoint ? existing.token : undefined),
+    // Never carry a token to another endpoint: a shared one stays only here.
+    token: sharedToken,
+    ...(Object.keys(agentTokens).length > 0 ? { agentTokens } : {}),
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     workspaceBindings: existing?.workspaceBindings ?? {},
     userGroupId: existing?.userGroupId,
@@ -4762,8 +5067,8 @@ export async function initLocalAgentHttp(options: {
 
   await ensureDir(getLocalAgentHome());
   await saveLocalAgentConfig(config);
-  if (options.token) {
-    await writeTokenFile(getTokenPath(), options.token);
+  if (token) {
+    await writeTokenFile(getTokenPath(), perAgent ? agentTokens[agent!] : token);
   }
 
   const teamConfig = createLocalAgentTeamConfig(endpoint);
@@ -4778,6 +5083,7 @@ export async function initLocalAgentHttp(options: {
     await memberCodexTrust(),
   );
   log.success(`HTTP local agent initialized at ${getConfigPath()}`);
+  log.info('Run `teamai bind-project` once in each workspace it should sync; it leaves any other workspace alone.');
 }
 
 export async function pullLocalAgentForCwd(context?: LocalAgentContext): Promise<boolean> {
@@ -5097,6 +5403,17 @@ export async function bindCurrentProject(options?: { projectId?: number; skip?: 
     await persistWorkspaceBinding(config, options?.cwd ?? process.cwd(), workspacePath, 0, '__skipped__');
     log.info(`已跳过绑定，以后不再提示此工作区。`);
     return;
+  }
+  // Running bind-project in a workspace enrolls it. Keep any existing entry
+  // (a bound project or a skip); otherwise record it as pending a project.
+  const config = await loadLocalAgentConfig();
+  if (!config) {
+    throw new Error('Local agent not initialized. Run `teamai init --http` first.');
+  }
+  const cwd = options?.cwd ?? process.cwd();
+  if (!config.workspaceBindings[workspacePath] && !await inheritWorktreeBinding(config, cwd, workspacePath)) {
+    await persistWorkspaceBinding(config, cwd, workspacePath, 0, PENDING_BINDING_NAME);
+    log.info(`Workspace enrolled for local-agent sync: ${workspacePath}`);
   }
   const binding = await bindWorkspaceToProject(workspacePath, options?.projectId);
   if (!binding) {

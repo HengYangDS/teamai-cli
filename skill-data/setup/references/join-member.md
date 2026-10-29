@@ -107,8 +107,15 @@ cannot use Git. If the admin provides an HTTP endpoint + API key instead, use:
 teamai init --http https://your-team-host/api --token <api-key>
 ```
 
+An agent access token (`sk-`) works for one agent only: pass that agent with
+`--agent <tool>` (see `teamai init --help`).
+
 This is a read-only consumer mode — `push` / `contribute` are not available, but
-skills and rules still sync.
+skills and rules still sync, in each workspace where `teamai bind-project` ran once
+(run it in the user's project). Binding a ClawPro project is optional:
+`teamai bind-project --skip` enrolls the workspace without one and stops the
+prompt. A worktree inherits its main checkout's choice, so run it once per
+project, not per worktree.
 
 **Claude Code or Codex kept in a different directory (`CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`):** `init` records that directory (as `toolRoots.claude` /
