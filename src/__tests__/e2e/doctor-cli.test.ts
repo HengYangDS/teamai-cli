@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const CLI = path.join(ROOT, 'dist', 'index.js');
+const HAS_SYSTEM_ZSH = process.platform !== 'win32'
+  && spawnSync('zsh', ['--version'], { env: { PATH: '/usr/bin:/bin' }, timeout: 5_000 }).status === 0;
 
 describe('teamai doctor CLI (e2e)', () => {
   let sandbox: string;
@@ -103,7 +105,7 @@ describe('teamai doctor CLI (e2e)', () => {
     expect(output).toContain('All checks passed!');
   });
 
-  it.skipIf(process.platform === 'win32')('finds gh through a real zsh login profile with a narrow caller PATH', () => {
+  it.skipIf(!HAS_SYSTEM_ZSH)('finds gh through a real zsh login profile with a narrow caller PATH', () => {
     const home = fs.mkdtempSync(path.join(sandbox, 'login-profile-home-'));
     const bin = path.join(home, 'bin');
     const loginBin = path.join(home, 'login-bin');
