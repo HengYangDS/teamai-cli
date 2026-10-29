@@ -178,8 +178,6 @@ describe('pull submodule skip-sync (issue #525)', () => {
     fs.rmSync(testRoot, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.mkdirSync(homeDir, { recursive: true });
-    // simple-git v4 ignores GIT_CONFIG_GLOBAL; use Git's native HOME config too.
-    fs.copyFileSync(globalGitConfig, path.join(homeDir, '.gitconfig'));
     // Re-assert every test: afterEach restores the original (usually unset) value,
     // so without this the second test would run with the file-protocol opt-in
     // dropped, its submodule update would fail, and the fast-path case below would

@@ -127,6 +127,11 @@ function isNativeExecutable(file: string): boolean {
  */
 const NO_PROMPT_VAR = 'GIT_TERMINAL_PROMPT' as const;
 const NO_PROMPT_VAL = '0' as const;
+const GIT_ENVIRONMENT = [
+  NO_PROMPT_VAR,
+  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+];
 
 /**
  * Set `GIT_TERMINAL_PROMPT=0` process-wide so no git subprocess can block on
@@ -186,12 +191,8 @@ export function createGit(basePath?: string, abort?: AbortSignal): SimpleGit {
     binary: gitBinary(),
     abort,
     config,
-    // Preserve identity and noninteractive operation under the v4 environment guard.
-    allowEnvironment: [
-      'GIT_TERMINAL_PROMPT',
-      'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
-      'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
-    ],
+    // The caller owns ambient Git configuration; the guard still checks explicit .env() additions.
+    allowEnvironment: [...GIT_ENVIRONMENT, ...Object.keys(process.env)],
   });
   return git.outputHandler(markOutputSeen);
 }
@@ -221,9 +222,13 @@ export function createGitWithBlockTimeout(basePath?: string): SimpleGit {
     ...(process.platform === 'win32' ? ['core.longpaths=true'] : []),
     'http.lowSpeedLimit=1', `http.lowSpeedTime=${Math.ceil(block / 1000) + 1}`,
   ];
-  const git = basePath
-    ? simpleGit({ baseDir: basePath, binary: gitBinary(), timeout: { block }, config })
-    : simpleGit({ binary: gitBinary(), timeout: { block }, config });
+  const git = simpleGit({
+    ...(basePath ? { baseDir: basePath } : {}),
+    binary: gitBinary(),
+    timeout: { block },
+    config,
+    allowEnvironment: [...GIT_ENVIRONMENT, ...Object.keys(process.env)],
+  });
   return git.outputHandler(markOutputSeen);
 }
 
