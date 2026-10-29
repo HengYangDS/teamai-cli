@@ -28,7 +28,9 @@ it.each(['node-22', 'nodejs'])('doctor accepts a live launcher installed through
     execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: team, env });
     const cli = (entry: string, ...args: string[]) => spawnSync(process.execPath, [entry, ...args], { cwd: project, env, encoding: 'utf8', timeout: 30000 });
     const runtime = path.join(root, process.platform === 'win32' ? `${name}.exe` : name);
-    fs.copyFileSync(process.execPath, runtime);
+    // A POSIX package-manager runtime may need libraries beside its real path.
+    if (process.platform === 'win32') fs.copyFileSync(process.execPath, runtime);
+    else fs.symlinkSync(process.execPath, runtime);
     const installed = spawnSync(runtime, [first, 'hooks', 'inject'], { cwd: project, env, encoding: 'utf8', timeout: 30000 });
     expect(installed.status, installed.stdout + installed.stderr).toBe(0);
     const file = path.join(home, '.pi/agent/extensions/teamai-hooks.ts');
