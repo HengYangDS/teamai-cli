@@ -212,7 +212,7 @@ export type HookFormat = 'claude' | 'cursor' | 'codex' | 'copilot' | 'zcode';
 export type HookSettings<R> = { readonly channel: 'settings'; readonly format: HookFormat; readonly reads: Reads<R> };
 
 /** A file or directory of teamai's own the tool loads from its home, written by the tool's own adapter. */
-export type HookAdapterId = 'opencode-plugin' | 'pi-extension' | 'omp-extension' | 'hermes-plugin' | 'openclaw-hook' | 'dsh-hooks' | 'kiro-hooks';
+export type HookAdapterId = 'opencode-plugin' | 'pi-extension' | 'omp-extension' | 'hermes-plugin' | 'openclaw-hook' | 'dsh-hooks' | 'kiro-hooks' | 'agy-hooks';
 export type HookAdapter = { readonly channel: 'adapter'; readonly adapter: HookAdapterId; readonly evidence: Evidence };
 
 /**
@@ -1234,6 +1234,46 @@ export const TOOLS = {
       votesJudge: { cell: '✓t', note: '#1374 judges the reply in its Stop payload; not rerun' },
       sessionJudge: { cell: '✓t', note: '#1386 the session judges its skill-driven run; not rerun' },
       agentHooks: { cell: '✓t', note: '#1224 writes them to settings.json; not rerun' },
+    },
+  },
+  // agy 1.4.8 runs: ~/.gemini/config holds the user customizations, <root>/.agents a project's.
+  agy: {
+    home: { dir: '.gemini/config' },
+    installedBy: 'home',
+    // A skill loads as a read of its SKILL.md (`view_file` or `read_file`).
+    skillLoad: { calls: [] },
+    skills: {
+      user: [{ base: 'home', path: '.gemini/config/skills', evidence: 'verified' }, { base: 'home', path: '.agents/skills', evidence: 'verified' }],
+      project: [{ base: 'project', path: '.agents/skills', when: 'workspaceUnder', evidence: 'verified' }],
+    },
+    rules: {
+      user: { channel: 'dir', format: 'agy', reads: [{ base: 'home', path: '.gemini/config/rules', evidence: 'verified' }] },
+      project: { channel: 'dir', format: 'agy', reads: [{ base: 'project', path: '.agents/rules', when: 'workspaceUnder', evidence: 'verified' }] },
+    },
+    blocks: {
+      user: { channel: 'file', file: { in: 'rules-dir', name: 'teamai-context.md', owned: true, header: 'trigger-always-on' }, reads: [{ base: 'home', path: '.gemini/config/rules', evidence: 'verified' }] },
+      project: { channel: 'file', file: { in: 'rules-dir', name: 'teamai-context.md', owned: true, header: 'trigger-always-on' }, reads: [{ base: 'project', path: '.agents/rules', when: 'workspaceUnder', evidence: 'verified' }] },
+    },
+    agents: {
+      user: { reads: [{ base: 'home', path: '.gemini/config/agents', evidence: 'verified' }] },
+      project: { reads: [{ base: 'project', path: '.agents/agents', when: 'workspaceUnder', evidence: 'verified' }] },
+    },
+    mcp: {
+      user: { format: 'agy', reads: [{ base: 'home', path: '.gemini/config/mcp_config.json', evidence: 'verified' }] },
+      project: { format: 'agy', reads: [{ base: 'project', path: '.agents/plugins/teamai/mcp_config.json', when: 'workspaceUnder', evidence: 'verified' }] },
+    },
+    hooks: { user: { channel: 'adapter', adapter: 'agy-hooks', evidence: 'verified' }, self: 'user' },
+    sessions: ['agy'],
+    launch: 'agy',
+    features: {
+      env: { cell: '✓v', note: 'agy 1.4.8 run_command inherits the environment agy starts in' },
+      workflows: '✓v',
+      recall: '✓v',
+      stats: '✓v',
+      aiBackend: '✓v',
+      votesJudge: { cell: '✗v', note: 'agy 1.4.8 PostToolUse carries no tool output, so a teamai recall run never reaches the recall log' },
+      sessionJudge: { cell: '✓t', note: 'invoke_subagent starts a fresh conversation that gets only its prompt (agy 1.4.8); no session variable, so the session names its tool with --tools; not run' },
+      agentHooks: { cell: '✓t', note: 'runs from teamai\'s team-hook bridge, which can block a tool call; the dispatcher hands it a Claude payload' },
     },
   },
 } as const satisfies Record<ToolId, ToolDescriptor>;
