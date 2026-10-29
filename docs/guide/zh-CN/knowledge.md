@@ -198,7 +198,7 @@ $ teamai import --dir ./orders-api
 ...
 ✔ Pushed to team knowledge repo (https://git.example.com/acme/team-ai.git)
 ✔ Local directory orders-api import complete
-⚠ Deep enrich incomplete: orders-api. Run `teamai import --dir ./orders-api` to retry.
+⚠ Deep enrich incomplete: orders-api. Run `teamai codebase --deep-enrich --project orders-api` to retry.
 $ echo $?
 1
 ```
@@ -206,7 +206,7 @@ $ echo $?
 `--from-repo-list` 或 `--from-org` 批量导入时，每个没完成的仓库各打印一行：
 
 ```text
-⚠ Deep enrich incomplete: github__acme__billing. Run `teamai import --from-repo https://github.com/acme/billing` to retry.
+⚠ Deep enrich incomplete: github__acme__billing. Run `teamai codebase --deep-enrich --project github__acme__billing` to retry.
 ```
 
 用了 `--output` 时，重试命令是对该目录执行 `teamai codebase --deep-enrich`：

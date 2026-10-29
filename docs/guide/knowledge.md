@@ -198,7 +198,7 @@ $ teamai import --dir ./orders-api
 ...
 ✔ Pushed to team knowledge repo (https://git.example.com/acme/team-ai.git)
 ✔ Local directory orders-api import complete
-⚠ Deep enrich incomplete: orders-api. Run `teamai import --dir ./orders-api` to retry.
+⚠ Deep enrich incomplete: orders-api. Run `teamai codebase --deep-enrich --project orders-api` to retry.
 $ echo $?
 1
 ```
@@ -206,7 +206,7 @@ $ echo $?
 A `--from-repo-list` or `--from-org` batch prints one line for each repo that did not finish:
 
 ```text
-⚠ Deep enrich incomplete: github__acme__billing. Run `teamai import --from-repo https://github.com/acme/billing` to retry.
+⚠ Deep enrich incomplete: github__acme__billing. Run `teamai codebase --deep-enrich --project github__acme__billing` to retry.
 ```
 
 With `--output`, the retry is `teamai codebase --deep-enrich` on that directory:
