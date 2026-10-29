@@ -60,6 +60,7 @@ function createEnrichFixture(project = 'faketest'): string {
 afterEach(() => {
   process.exitCode = undefined;
   vi.restoreAllMocks();
+  vi.resetAllMocks();
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }

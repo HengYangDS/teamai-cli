@@ -133,6 +133,7 @@ describe('codebase reconciliation', () => {
     await codebaseCmd({ reconcile: true });
     const head = await createGit(remote).raw(['rev-parse', 'main']);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    log.mockClear();
 
     await codebaseCmd({ reconcile: true });
 

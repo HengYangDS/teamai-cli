@@ -53,7 +53,7 @@ function isWebUrl(value: unknown): value is string {
     return false;
   }
 }
-const RecordSchema: z.ZodType<ReadRecord, z.ZodTypeDef, unknown> = z.object({
+const RecordSchema: z.ZodType<ReadRecord> = z.object({
   run: z.string().refine(isRunId),
   workflow: z.string(),
   alias: z.string().optional().catch(undefined),

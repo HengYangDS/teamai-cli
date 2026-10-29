@@ -850,7 +850,7 @@ steps:
     if (team) fs.writeFileSync(path.join(config.repo.localPath, 'scorers', 'scoring.yaml'), team);
     return config;
   }
-  const BatchLeaseSchema = LeaseSchema.extend({ scorers: z.array(z.string()), batched: z.literal(true), answer: z.object({ schema: z.record(z.unknown()) }) });
+  const BatchLeaseSchema = LeaseSchema.extend({ scorers: z.array(z.string()), batched: z.literal(true), answer: z.object({ schema: z.record(z.string(), z.unknown()) }) });
   const labelsOf = (config: LocalConfig): unknown[] =>
     fs.readFileSync(path.join(config.dataHome ?? '', 'scores', 'labels.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as unknown);
   const both = { quality: { label: 'good', reasoning: 'Found the defect.' }, tests: { label: 'thin', reasoning: 'No test for it.' } };
@@ -1185,7 +1185,7 @@ process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify
     const runId = await settledRun(config);
     const lease = leaseOf(await nextJudgeLease(config, request()));
     const file = path.join(config.dataHome ?? '', 'workflows', 'runs', `${runId}.json`);
-    const run = z.object({ scorers: z.record(z.object({ sourceHash: z.string(), content: z.string() })) }).passthrough().parse(JSON.parse(fs.readFileSync(file, 'utf8')));
+    const run = z.object({ scorers: z.record(z.string(), z.object({ sourceHash: z.string(), content: z.string() })) }).passthrough().parse(JSON.parse(fs.readFileSync(file, 'utf8')));
     const content = scorer(100).replace('value: good', 'value: excellent');
     fs.writeFileSync(file, JSON.stringify({ ...run, scorers: { quality: { sourceHash: 'f'.repeat(64), content } } }));
 

@@ -19,7 +19,7 @@ const SHARE = { learnings: [
 const SKIP = { learnings: [] };
 
 const TurnSchema = z.object({
-  lease: z.object({ step: z.string(), attempt: z.string(), revision: z.number(), prompt: z.string().optional(), command: z.string().optional(), env: z.record(z.string()).optional() }).optional(),
+  lease: z.object({ step: z.string(), attempt: z.string(), revision: z.number(), prompt: z.string().optional(), command: z.string().optional(), env: z.record(z.string(), z.string()).optional() }).optional(),
   hitl: z.object({ step: z.string(), required: z.boolean() }).optional(),
   done: z.object({ outcome: z.string() }).optional(),
 });

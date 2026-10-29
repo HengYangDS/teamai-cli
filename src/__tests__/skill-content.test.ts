@@ -399,6 +399,7 @@ describe('npm package contents', () => {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
+    // npm 12 keys JSON output by package name; earlier releases return an array.
     const files = Object.values(JSON.parse(packed) as Record<string, { files: Array<{ path: string }> }>)[0]
       .files.map((f) => f.path);
 

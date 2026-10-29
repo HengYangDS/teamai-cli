@@ -64,7 +64,11 @@ export const ToolPathsSchema = z.object({
 
 // ─── Scope ──────────────────────────────────────────────
 
-export const ScopeEnum = z.enum(['user', 'project']);
+const unknownScopeError = (issue: { input?: unknown }) => typeof issue.input === 'string'
+  ? `scope "${issue.input}" is not one this teamai knows; a newer teamai may have written it. Run \`teamai update\``
+  : undefined;
+
+export const ScopeEnum = z.enum(['user', 'project'], { error: unknownScopeError });
 export type Scope = z.infer<typeof ScopeEnum>;
 
 /**
@@ -74,7 +78,7 @@ export type Scope = z.infer<typeof ScopeEnum>;
  * so code compares against one value; the serializer writes `workspace`.
  */
 export const InstallScopeSchema = z
-  .enum(['user', 'workspace', 'project'])
+  .enum(['user', 'workspace', 'project'], { error: unknownScopeError })
   .transform((scope): Scope => (scope === 'workspace' ? 'project' : scope));
 
 /** The value of a `--scope` option. Every command that takes one reads it here. */
@@ -95,14 +99,14 @@ export const SharingConfigSchema = z.object({
   skills: z.object({}).default({}),
   rules: z.object({
     enforced: z.array(z.string()).default([]),
-  }).default({}),
+  }).prefault({}),
   docs: z.object({
     localDir: z.string().default('~/.teamai/docs'),
-  }).default({}),
+  }).prefault({}),
   env: z.object({
     injectShellProfile: z.boolean().default(true),
     shellProfilePath: z.string().optional(),
-  }).default({}),
+  }).prefault({}),
   // Optional (not .default) so existing TeamaiConfig literals stay valid; use
   // getHooksSharing() for the defaulted view.
   hooks: z.object({
@@ -732,7 +736,7 @@ export const TeamaiConfigBaseSchema = z.object({
   publicSkills: z.array(z.string()).optional(),
   /** External team repos to pull skills from. Managed by team admin. */
   sources: z.array(SourceConfigSchema).optional(),
-  sharing: SharingConfigSchema.default({}),
+  sharing: SharingConfigSchema.prefault({}),
   /** Team-level default: whether `teamai update` auto-installs upgrades. Users
    * can override via `updatePolicy` in local config. Undefined = team has no
    * opinion (preserves legacy behavior). */

@@ -240,8 +240,8 @@ async function skillAnswer(raw: Parameters<typeof parseSkillCall>[0]): Promise<{
 
 /** The flags of `workflow start` and `resume` without `--driver skill`. The skill driver's flags are refused, the first given in this order. */
 const NonSkillRunOptionsSchema = z.object({
-  parallel: z.undefined({ invalid_type_error: '--parallel needs --driver skill' }),
-  hitl: z.undefined({ invalid_type_error: '--hitl needs --driver skill' }),
+  parallel: z.undefined({ error: '--parallel needs --driver skill' }).optional(),
+  hitl: z.undefined({ error: '--hitl needs --driver skill' }).optional(),
   judge: z.boolean().optional().refine((judged) => judged !== false, '--no-judge needs --driver skill'),
 });
 
@@ -308,8 +308,8 @@ export async function workflowStart(name: string, options: {
 }
 
 /** Refuses `--driver <kind>` on `command`, which takes only `--driver skill`, naming the kind given. */
-function refusedDriverFlag(command: 'next' | 'report'): z.ZodUndefined {
-  return z.undefined({ errorMap: (_issue, ctx) => ({ message: `${command} takes --driver skill, not --driver ${String(ctx.data)}` }) });
+function refusedDriverFlag(command: 'next' | 'report'): z.ZodOptional<z.ZodUndefined> {
+  return z.undefined({ error: (issue) => `${command} takes --driver skill, not --driver ${String(issue.input)}` }).optional();
 }
 
 /**
@@ -322,8 +322,8 @@ const JsonNextOptionsSchema = z.object({
   wait: z.boolean().optional().refine((given) => !given, '--wait needs --driver skill'),
   takeover: z.boolean().optional().refine((given) => !given, '--takeover needs --driver skill'),
   confirmed: z.boolean().optional().refine((given) => !given, '--confirmed on next needs --driver skill --takeover'),
-  choice: z.undefined({ invalid_type_error: '--choice needs --driver skill' }),
-  ack: z.undefined({ invalid_type_error: '--ack needs --driver skill' }),
+  choice: z.undefined({ error: '--choice needs --driver skill' }).optional(),
+  ack: z.undefined({ error: '--ack needs --driver skill' }).optional(),
   json: z.string().optional(),
   prepare: z.boolean().optional(),
   attempt: z.string().optional(),
@@ -345,7 +345,7 @@ const JsonNextOptionsSchema = z.object({
 /** The flags of `workflow report` for a driver that sends `--json`. The skill driver's flags are refused. */
 const JsonReportOptionsSchema = z.object({
   driver: refusedDriverFlag('report'),
-  attempt: z.undefined({ invalid_type_error: '--attempt needs --driver skill' }),
+  attempt: z.undefined({ error: '--attempt needs --driver skill' }).optional(),
   modelUnavailable: z.boolean().optional().refine((given) => !given, '--model-unavailable needs --driver skill'),
   json: z.string().optional(),
 });

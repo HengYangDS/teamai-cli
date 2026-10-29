@@ -17,7 +17,7 @@ const TEAM_URL = 'https://github.com/acme/team.git';
 const SESSION = '7c1e0000-0000-4000-8000-000000000001';
 const PHRASE = 'Only-the-session-said-this-wombat';
 
-const EnvelopeSchema = z.object({ data: z.record(z.unknown()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() });
+const EnvelopeSchema = z.object({ data: z.record(z.string(), z.unknown()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() });
 
 function runCLI(args: string[], cwd: string, env: NodeJS.ProcessEnv, input = ''): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {

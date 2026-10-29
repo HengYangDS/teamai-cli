@@ -227,7 +227,7 @@ const RunProgressSchema = z.object({
   sessionContinuations: z.array(SessionContinuationSchema).optional(),
   releasedTokens: z.array(ReleasedTokensSchema).optional(),
   stoppedAttempts: z.array(StoppedAttemptSchema).optional(),
-  scorers: z.record(PinnedScorerSchema).optional(),
+  scorers: z.record(z.string(), PinnedScorerSchema).optional(),
 });
 
 export async function readRun(config: LocalConfig, runId: string): Promise<RunState | 'missing' | 'corrupt'> {

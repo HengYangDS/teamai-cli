@@ -22,7 +22,7 @@ const SESSION = '7c1e0000-0000-4000-8000-000000001388';
 const TITLES = ['Retry the pod readiness probe', 'pnpm needs --frozen-lockfile in CI'];
 const SHARE_INPUTS = { session: SESSION, source: 'claude-code', publish: false, scorers: [], judge: 'driver' };
 
-const EnvelopeSchema = z.object({ data: z.record(z.unknown()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() });
+const EnvelopeSchema = z.object({ data: z.record(z.string(), z.unknown()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() });
 const DescribeSchema = z.object({ describe: z.object({ ask: z.object({ question: z.object({ options: z.array(z.object({ start: z.string() })).nonempty() }) }) }) });
 const ActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('choose'), about: z.enum(['host', 'gate']), options: z.array(z.object({ run: z.string(), id: z.string().optional(), choice: z.string().optional() })) }),
