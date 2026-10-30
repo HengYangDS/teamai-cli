@@ -113,7 +113,10 @@ export interface JudgeRequest {
 const NextPayloadSchema = z.object({
   driver: DriverSchema.extend({
     can: z.object({
-      judge: z.object({ isolation: z.enum(ISOLATIONS), access: z.enum(ACCESS_LEVELS).optional(), tools: z.tuple([z.string().min(1)], z.string().min(1)) }, {
+      judge: z.object({
+        isolation: z.enum(ISOLATIONS), access: z.enum(ACCESS_LEVELS).optional(),
+        tools: z.array(z.string().min(1)).nonempty('Array must contain at least 1 element(s)').pipe(z.tuple([z.string().min(1)], z.string().min(1))),
+      }, {
         error: (issue) => issue.input === undefined ? 'driver.can.judge is required: {"isolation":"verified" or "best-effort","tools":["claude",…]}' : undefined,
       }),
     }, { error: (issue) => issue.input === undefined ? 'driver.can.judge is required: {"isolation":"verified" or "best-effort","tools":["claude",…]}' : undefined }),

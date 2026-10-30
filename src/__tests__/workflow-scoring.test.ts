@@ -239,6 +239,12 @@ console.log(JSON.stringify({ type: 'result', structured_output: { label: 'great'
     expect(run.steps[0]).toMatchObject({ installId: (await installOwner(config)).id });
   });
 
+  it('explains that a judge needs at least one tool', () => {
+    expect(parseJudgeRequest({ driver: { ...judgeDriver, can: { judge: { isolation: 'verified', tools: [] } } } })).toBe(
+      'driver.can.judge.tools: Array must contain at least 1 element(s)',
+    );
+  });
+
   it('records the access the driver declares for its judge, full when it declares none', async () => {
     const config = fixture(scorer(100));
     await settledRun(config);

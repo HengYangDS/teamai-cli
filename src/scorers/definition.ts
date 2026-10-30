@@ -93,7 +93,7 @@ export function parseScorer(relativePath: string, content: string): ParsedScorer
   if (raw === '') return fail('a scorer starts with YAML frontmatter between --- lines');
   if (!valid) return fail('the frontmatter must be a YAML mapping');
   const parsed = FrontmatterSchema.safeParse(data);
-  const problems = parsed.success ? [] : parsed.error.issues.flatMap(issueMessages);
+  const problems = parsed.success ? [] : [...new Set(parsed.error.issues.flatMap(issueMessages))];
   if (body.trim() === '') problems.push('the prompt after the frontmatter is empty');
   if (!parsed.success || problems.length > 0) return fail(...problems);
   return { ok: true, definition: { name, ...parsed.data, prompt: body } };
